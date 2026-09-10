@@ -1,0 +1,166 @@
+{
+  "icon": "panels-top-left",
+  "main": "runtime/index.js",
+  "uiSlots": {
+    "left_sidebar": "workspace.panel",
+    "footer": "workspace.footer"
+  },
+  "slotDefaults": {
+    "left_sidebar": {
+      "order": 100
+    },
+    "footer": {
+      "side": "left",
+      "order": 20
+    }
+  },
+  "consumes": [
+    {
+      "id": "workspace.viewState",
+      "kind": "extension",
+      "range": "^1.0.0",
+      "optional": true
+    }
+  ],
+  "settingsSchema": {
+    "fields": [
+      {
+        "key": "saveIconRail",
+        "label": "Save Icon Rail",
+        "labelKey": "plugin.workspace.setting.saveIconRail",
+        "type": "boolean",
+        "default": false,
+        "description": "Include Icon Rail visibility, panel order, and hidden items in workspace layouts.",
+        "descriptionKey": "plugin.workspace.setting.saveIconRailDesc"
+      },
+      {
+        "key": "saveFooterRail",
+        "label": "Save Footer Rail",
+        "labelKey": "plugin.workspace.setting.saveFooterRail",
+        "type": "boolean",
+        "default": false,
+        "description": "Include Footer Rail visibility and left, right, and hidden item arrangement in workspace layouts.",
+        "descriptionKey": "plugin.workspace.setting.saveFooterRailDesc"
+      },
+      {
+        "key": "saveRightSidebarState",
+        "label": "Save right sidebar state",
+        "labelKey": "plugin.workspace.setting.saveRightSidebarState",
+        "type": "boolean",
+        "default": true,
+        "description": "Include the right sidebar's visibility, width, panels, splits, selection, and participating plugin views.",
+        "descriptionKey": "plugin.workspace.setting.saveRightSidebarStateDesc"
+      }
+    ]
+  },
+  "guardPresets": {
+    "schemaVersion": 1,
+    "defaultPreset": "recommended",
+    "presets": [
+      {
+        "id": "recommended",
+        "label": "Recommended",
+        "version": 1,
+        "description": "Local workspace layout changes are reversible and run without asking.",
+        "entries": {
+          "commands": {
+            "save": {
+              "decision": "allow"
+            },
+            "load": {
+              "decision": "allow"
+            },
+            "open": {
+              "decision": "allow"
+            },
+            "rename": {
+              "decision": "allow"
+            },
+            "delete": {
+              "decision": "allow"
+            },
+            "close": {
+              "decision": "allow"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "provides": [
+    {
+      "id": "workspace.surface",
+      "kind": "extension",
+      "version": "1.0.0"
+    }
+  ],
+  "datasets": [
+    {
+      "id": "workspace_groups",
+      "store": "durable",
+      "version": 1,
+      "title": "Workspace groups",
+      "primaryKey": [
+        "name"
+      ],
+      "columns": {
+        "name": {
+          "type": "text"
+        },
+        "position": {
+          "type": "integer"
+        }
+      },
+      "titleKey": "auto.6bab1d062ddf"
+    },
+    {
+      "id": "workspace_layouts",
+      "store": "durable",
+      "version": 1,
+      "title": "Workspace layouts",
+      "primaryKey": [
+        "name"
+      ],
+      "columns": {
+        "name": {
+          "type": "text"
+        },
+        "group": {
+          "type": "text"
+        },
+        "snapshotVersion": {
+          "type": "integer"
+        },
+        "snapshot": {
+          "type": "json"
+        },
+        "createdAt": {
+          "type": "integer"
+        },
+        "modifiedAt": {
+          "type": "integer"
+        }
+      },
+      "indexes": [
+        {
+          "id": "group",
+          "columns": [
+            "group",
+            "name"
+          ]
+        }
+      ],
+      "titleKey": "auto.e618141e2c5b"
+    }
+  ],
+  "locales": {
+    "en": "runtime/locales/en.json",
+    "de": "runtime/locales/de.json",
+    "es": "runtime/locales/es.json",
+    "fr": "runtime/locales/fr.json",
+    "zh-CN": "runtime/locales/zh-CN.json"
+  },
+  "runtime": {
+    "ui": "runtime/index.js"
+  }
+}

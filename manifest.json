@@ -1,0 +1,16 @@
+{
+  "apiVersion": 5,
+  "id": "workspace",
+  "name": "Workspace",
+  "version": "2.0.0",
+  "description": "Save and restore exact named workspace layouts: panes, tabs, the left sidebar, and optional right sidebar, Icon Rail, Footer Rail, and plugin view state.",
+  "author": [
+    "Yanik"
+  ],
+  "authorUrl": [
+    "https://github.com/yanik02"
+  ],
+  "isDesktopOnly": true,
+  "minAppVersion": "0.1.0",
+  "enabled": true
+}
