@@ -12,295 +12,112 @@
  * field and the explicit rows in `workspace.workspace_groups`. That is what lets
  * an empty group exist before a layout is saved into it.
  */
-import {
-  WORKSPACE_VIEW_STATE_V1,
-  type InteropExtensionProvider,
-  type ValleyPluginApi,
-  type WorkspaceViewStateProvider
-} from '@valley/plugin-sdk'
-import type {
-  WorkspaceLayoutSnapshot,
-  WorkspaceNode,
-  WorkspacePluginViewState,
-  WorkspaceViewStateValue,
-  WorkspaceViewSurface
-} from '@valley/plugin-sdk/types'
-import type { DatasetRecord } from '@valley/plugin-sdk'
+import type { ValleyPluginApi } from '@valley/plugin-sdk'
+import type { WorkspaceLayoutSnapshot } from '@valley/plugin-sdk/types'
+import { WorkspaceLayoutState } from './layoutState'
+import { WorkspaceRepository, GROUPS_DATASET, LAYOUTS_DATASET, dedupeGroups, normalizeLayout, type SavedLayout } from './repository'
+export type { SavedLayout } from './repository'
+export { structuralSnapshotKey } from './layoutState'
 import { api as runtimeApi, initRuntime } from './runtime'
-
-export interface SavedLayout {
-  name: string
-  /** Optional group label; empty string means ungrouped. */
-  group: string
-  snapshot: WorkspaceLayoutSnapshot
-  createdAt: number
-  modifiedAt: number
-}
 
 const STORE_KEY = 'workspace.store'
 const ACTIVE_SETTING = 'active'
-const ICON_RAIL_SETTING = 'saveIconRail'
-const FOOTER_RAIL_SETTING = 'saveFooterRail'
-const RIGHT_SIDEBAR_SETTING = 'saveRightSidebarState'
-const GROUPS_DATASET = 'workspace_groups'
-const LAYOUTS_DATASET = 'workspace_layouts'
-/**
- * A key for "has the live arrangement diverged from what's saved" comparisons —
- * includes the complete captured snapshot, including the focused pane and active
- * tab. Switching to another open tab therefore makes the current layout different
- * until the saved layout is restored or saved again.
- */
-export function structuralSnapshotKey(snapshot: WorkspaceLayoutSnapshot): string {
-  try {
-    return JSON.stringify(stableValue(storedSnapshot(snapshot)))
-  } catch {
-    return ''
-  }
-}
-
-function stableValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stableValue)
-  if (!value || typeof value !== 'object') return value
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>)
-      .filter(([, item]) => item !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, item]) => [key, stableValue(item)])
-  )
-}
-
-function jsonState(value: unknown): WorkspaceViewStateValue | undefined {
-  try {
-    const encoded = JSON.stringify(value)
-    if (encoded === undefined) return undefined
-    return JSON.parse(encoded) as WorkspaceViewStateValue
-  } catch {
-    return undefined
-  }
-}
-
-function normalizePluginViewStates(value: unknown): WorkspacePluginViewState[] | undefined {
-  if (!Array.isArray(value)) return undefined
-  const states = value.flatMap((entry): WorkspacePluginViewState[] => {
-    if (!entry || typeof entry !== 'object') return []
-    const raw = entry as Record<string, unknown>
-    if (
-      typeof raw.owner !== 'string' || !raw.owner ||
-      typeof raw.id !== 'string' || !raw.id ||
-      !['left_sidebar', 'right_sidebar', 'main_workspace'].includes(String(raw.surface))
-    ) return []
-    const state = jsonState(raw.state)
-    if (state === undefined) return []
-    return [{
-      owner: raw.owner,
-      id: raw.id,
-      surface: raw.surface as WorkspaceViewSurface,
-      state
-    }]
-  })
-  states.sort((left, right) =>
-    left.owner.localeCompare(right.owner) ||
-    left.surface.localeCompare(right.surface) ||
-    left.id.localeCompare(right.id)
-  )
-  return states.length > 0 ? states : undefined
-}
-
-/** Keep only recognized fields while preserving optional legacy/new scopes. */
-function storedSnapshot(raw: WorkspaceLayoutSnapshot): WorkspaceLayoutSnapshot {
-  const pluginViewStates = normalizePluginViewStates(raw.pluginViewStates)
-  return {
-    layout: raw.layout,
-    activePaneId: raw.activePaneId,
-    leftSidebarWidth: raw.leftSidebarWidth,
-    leftSidebarVisible: raw.leftSidebarVisible,
-    ...(typeof raw.activePanel === 'string' ? { activePanel: raw.activePanel } : {}),
-    ...(typeof raw.rightSidebarWidth === 'number' ? { rightSidebarWidth: raw.rightSidebarWidth } : {}),
-    ...(typeof raw.rightSidebarVisible === 'boolean' ? { rightSidebarVisible: raw.rightSidebarVisible } : {}),
-    ...(raw.rightSidebarLayout ? { rightSidebarLayout: raw.rightSidebarLayout } : {}),
-    ...(typeof raw.railVisible === 'boolean' ? { railVisible: raw.railVisible } : {}),
-    ...(Array.isArray(raw.panelOrder) ? { panelOrder: raw.panelOrder.filter((id): id is string => typeof id === 'string') } : {}),
-    ...(Array.isArray(raw.hiddenPanelIds)
-      ? { hiddenPanelIds: raw.hiddenPanelIds.filter((id): id is string => typeof id === 'string') }
-      : {}),
-    ...(typeof raw.footerVisible === 'boolean' ? { footerVisible: raw.footerVisible } : {}),
-    ...(raw.footerLayout ? { footerLayout: raw.footerLayout } : {}),
-    ...(pluginViewStates ? { pluginViewStates } : {})
-  }
-}
-
-interface CaptureSettings {
-  iconRail: boolean
-  footerRail: boolean
-  rightSidebar: boolean
-}
-
-const providerKey = (owner: string, provider: WorkspaceViewStateProvider): string =>
-  `${owner}\u0000${provider.surface}\u0000${provider.id}`
-
-const stateKey = (entry: WorkspacePluginViewState): string =>
-  `${entry.owner}\u0000${entry.surface}\u0000${entry.id}`
-
-function allTabs(node: WorkspaceNode): { kind?: string; pluginId?: string }[] {
-  return node.type === 'leaf' ? node.tabs : node.children.flatMap(allTabs)
-}
-
-function ownerPresent(snapshot: WorkspaceLayoutSnapshot, surface: WorkspaceViewSurface, owner: string): boolean {
-  if (surface === 'left_sidebar') return snapshot.activePanel === owner
-  const node = surface === 'right_sidebar' ? snapshot.rightSidebarLayout : snapshot.layout
-  if (!node) return false
-  return allTabs(node).some((tab) => tab.pluginId === owner || tab.kind === owner)
-}
-
 export class WorkspaceStore {
   layouts: SavedLayout[] = []
   /** Groups created on their own; they stay listed while they hold no layout. */
   declaredGroups: string[] = []
   active: string | null = null
   private loaded = false
-  private persistQueue: Promise<void> = Promise.resolve()
-  private persistFailure: { reason: unknown } | null = null
+  private disposed = false
+  private refreshRevision = 0
+  private refreshPromise: Promise<void> | null = null
+  private readonly repository: WorkspaceRepository
   private readonly listeners = new Set<() => void>()
   private readonly cleanups: (() => void)[] = []
-  private providerCleanups: (() => void)[] = []
+  private readonly layoutState: WorkspaceLayoutState
+  private projection: {
+    layouts: SavedLayout[]
+    declaredGroups: string[]
+    byName: Map<string, SavedLayout>
+    groups: { group: string; layouts: SavedLayout[] }[]
+    groupNames: string[]
+    groupKeys: Set<string>
+  } | null = null
 
   constructor(private readonly api: ValleyPluginApi) {
-    this.cleanups.push(api.runtime.onBeforeUnload(async () => {
-      let pending: Promise<void>
-      do { pending = this.persistQueue; await pending } while (pending !== this.persistQueue)
-      if (this.persistFailure) throw this.persistFailure.reason
-    }))
+    this.layoutState = new WorkspaceLayoutState(api, () => this.notify())
+    this.repository = new WorkspaceRepository(api, () => this.notify())
+    this.cleanups.push(api.runtime.onBeforeUnload(() => this.repository.drain()))
     this.cleanups.push(api.settings.subscribe(() => this.notify()))
-    const refresh = (): void => { if (this.loaded) void this.refresh() }
+    const refresh = (): void => { if (this.loaded || this.refreshPromise) void this.refresh() }
     this.cleanups.push(api.data.dataset(GROUPS_DATASET).subscribe(refresh))
     this.cleanups.push(api.data.dataset(LAYOUTS_DATASET).subscribe(refresh))
-    this.cleanups.push(api.interop.extensions.subscribe(WORKSPACE_VIEW_STATE_V1, () => {
-      this.bindProviderSubscriptions()
-      this.notify()
-    }))
-    this.bindProviderSubscriptions()
   }
 
   dispose(): void {
-    this.providerCleanups.splice(0).forEach((off) => off())
+    this.disposed = true
+    this.layoutState.dispose()
     this.cleanups.splice(0).forEach((off) => off())
     this.listeners.clear()
   }
 
-  private providers(): readonly InteropExtensionProvider<WorkspaceViewStateProvider>[] {
-    return this.api.interop.extensions.providers(WORKSPACE_VIEW_STATE_V1)
-  }
-
-  private bindProviderSubscriptions(): void {
-    this.providerCleanups.splice(0).forEach((off) => off())
-    for (const provider of this.providers()) {
-      try {
-        this.providerCleanups.push(provider.extension.subscribe(() => this.notify()))
-      } catch {
-        // A broken provider never prevents the remaining workspace state from saving.
-      }
-    }
-  }
-
-  private captureSettings(): CaptureSettings {
-    const settings = this.api.settings.get()
-    return {
-      iconRail: settings[ICON_RAIL_SETTING] === true,
-      footerRail: settings[FOOTER_RAIL_SETTING] === true,
-      rightSidebar: settings[RIGHT_SIDEBAR_SETTING] !== false
-    }
-  }
-
-  private projectSnapshot(raw: WorkspaceLayoutSnapshot): WorkspaceLayoutSnapshot {
-    const snapshot = storedSnapshot(raw)
-    const settings = this.captureSettings()
-    const projected: WorkspaceLayoutSnapshot = {
-      layout: snapshot.layout,
-      activePaneId: snapshot.activePaneId,
-      leftSidebarWidth: snapshot.leftSidebarWidth,
-      leftSidebarVisible: snapshot.leftSidebarVisible,
-      ...(snapshot.activePanel ? { activePanel: snapshot.activePanel } : {})
-    }
-    if (settings.rightSidebar) {
-      if (snapshot.rightSidebarWidth != null) projected.rightSidebarWidth = snapshot.rightSidebarWidth
-      if (snapshot.rightSidebarVisible != null) projected.rightSidebarVisible = snapshot.rightSidebarVisible
-      if (snapshot.rightSidebarLayout) projected.rightSidebarLayout = snapshot.rightSidebarLayout
-    }
-    if (settings.iconRail) {
-      if (snapshot.railVisible != null) projected.railVisible = snapshot.railVisible
-      if (snapshot.panelOrder) projected.panelOrder = snapshot.panelOrder
-      if (snapshot.hiddenPanelIds) projected.hiddenPanelIds = snapshot.hiddenPanelIds
-    }
-    if (settings.footerRail) {
-      if (snapshot.footerVisible != null) projected.footerVisible = snapshot.footerVisible
-      if (snapshot.footerLayout) projected.footerLayout = snapshot.footerLayout
-    }
-    const pluginViewStates = snapshot.pluginViewStates?.filter((entry) =>
-      entry.surface !== 'right_sidebar' || settings.rightSidebar
-    )
-    if (pluginViewStates?.length) projected.pluginViewStates = pluginViewStates
-    return projected
-  }
-
-  private captureProviderStates(snapshot: WorkspaceLayoutSnapshot): WorkspacePluginViewState[] {
-    const settings = this.captureSettings()
-    const states: WorkspacePluginViewState[] = []
-    for (const provider of this.providers()) {
-      const extension = provider.extension
-      if (extension.surface === 'right_sidebar' && !settings.rightSidebar) continue
-      if (!ownerPresent(snapshot, extension.surface, provider.owner)) continue
-      try {
-        const state = jsonState(extension.capture())
-        if (state === undefined) continue
-        states.push({
-          owner: provider.owner,
-          id: extension.id,
-          surface: extension.surface,
-          state
-        })
-      } catch {
-        // Keep the host layout usable even when one provider cannot capture.
-      }
-    }
-    return normalizePluginViewStates(states) ?? []
-  }
-
   /** Load the persisted list + active name once (idempotent). */
-  async ensureLoaded(): Promise<void> {
-    if (this.loaded) return
-    await this.refresh()
-    this.loaded = true
+  ensureLoaded(): Promise<void> {
+    if (this.loaded || this.disposed) return Promise.resolve()
+    return this.refreshPromise ?? this.refresh()
   }
 
   /** Re-read the list from disk (e.g. another window mutated it). */
-  async refresh(): Promise<void> {
-    const [layouts, groups] = await Promise.all([
-      this.readDataset(LAYOUTS_DATASET),
-      this.readDataset(GROUPS_DATASET)
-    ])
-    this.layouts = layouts
-      .map((r) => normalize(r))
-      .filter((l): l is SavedLayout => l !== null)
-      .sort((a, b) => a.name.localeCompare(b.name))
-    this.declaredGroups = dedupeGroups(groups
-      .sort((a, b) => Number(a.position) - Number(b.position))
-      .map((record) => asName(record.name)))
-    const settingActive = this.api.settings.get()[ACTIVE_SETTING]
-    this.active = typeof settingActive === 'string' && this.find(settingActive) ? settingActive : null
-    this.notify()
+  refresh(): Promise<void> {
+    if (this.disposed) return Promise.resolve()
+    this.refreshRevision++
+    if (this.refreshPromise) return this.refreshPromise
+    const pending = this.readLatest().finally(() => {
+      if (this.refreshPromise === pending) this.refreshPromise = null
+    })
+    this.refreshPromise = pending
+    void pending.catch(() => {})
+    return pending
   }
 
-  find(name: string): SavedLayout | undefined {
-    const key = name.trim().toLowerCase()
-    return this.layouts.find((l) => l.name.toLowerCase() === key)
+  private async readLatest(): Promise<void> {
+    while (!this.disposed) {
+      const writes = this.repository.pending
+      await writes
+      if (this.disposed || this.repository.failure) return
+      if (writes !== this.repository.pending) continue
+      const revision = this.refreshRevision
+      const records = await Promise.allSettled([
+        this.repository.readDataset(LAYOUTS_DATASET, () => this.disposed),
+        this.repository.readDataset(GROUPS_DATASET, () => this.disposed)
+      ])
+      if (this.disposed) return
+      if (revision !== this.refreshRevision || writes !== this.repository.pending) continue
+      const failed = records.find((result) => result.status === 'rejected')
+      if (failed?.status === 'rejected') throw failed.reason
+      const [layouts, groups] = records.map((result) => result.status === 'fulfilled' ? result.value : [])
+      this.layouts = layouts
+        .map((r) => normalizeLayout(r))
+        .filter((l): l is SavedLayout => l !== null)
+        .sort((a, b) => a.name.localeCompare(b.name))
+      this.declaredGroups = dedupeGroups(groups
+        .sort((a, b) => Number(a.position) - Number(b.position))
+        .map((record) => typeof record.name === 'string' ? record.name.trim() : ''))
+      const settingActive = this.api.settings.get()[ACTIVE_SETTING]
+      this.active = typeof settingActive === 'string' && this.find(settingActive) ? settingActive : null
+      this.loaded = true
+      this.notify()
+      if (revision === this.refreshRevision) return
+    }
   }
 
-  /**
-   * Group → layouts, in a stable, case-insensitive order (ungrouped last).
-   * Declared groups are listed even when empty; a layout whose group differs
-   * only by case joins the declared one rather than heading a twin.
-   */
-  groups(): { group: string; layouts: SavedLayout[] }[] {
+  private indexed() {
+    if (this.projection?.layouts === this.layouts && this.projection.declaredGroups === this.declaredGroups) return this.projection
+    const byName = new Map<string, SavedLayout>()
+    for (const layout of this.layouts) {
+      const key = layout.name.toLowerCase()
+      if (!byName.has(key)) byName.set(key, layout)
+    }
     const byGroup = new Map<string, SavedLayout[]>()
     const labels = new Map<string, string>()
     const bucket = (raw: string): string => {
@@ -313,22 +130,25 @@ export class WorkspaceStore {
     }
     for (const declared of this.declaredGroups) if (declared) bucket(declared)
     for (const l of this.layouts) byGroup.get(bucket(l.group.trim()))?.push(l)
-    return [...byGroup.entries()]
+    const groups = [...byGroup.entries()]
       .map(([key, layouts]) => ({ group: labels.get(key) ?? key, layouts }))
       .sort((a, b) => (a.group === '' ? 1 : b.group === '' ? -1 : a.group.localeCompare(b.group)))
+    const groupNames = groups.map(group => group.group).filter(group => group !== '')
+    return this.projection = {
+      layouts: this.layouts, declaredGroups: this.declaredGroups, byName, groups, groupNames,
+      groupKeys: new Set(groupNames.map(group => group.toLowerCase()))
+    }
   }
 
-  /** Every group name that currently exists (declared or held by a layout). */
-  groupNames(): string[] {
-    return this.groups()
-      .map((g) => g.group)
-      .filter((g) => g !== '')
-  }
+  find(name: string): SavedLayout | undefined { return this.indexed().byName.get(name.trim().toLowerCase()) }
 
-  /** Does a group by this name exist already (case-insensitive)? */
+  groups(): { group: string; layouts: SavedLayout[] }[] { return this.indexed().groups }
+
+  groupNames(): string[] { return this.indexed().groupNames }
+
   hasGroup(name: string): boolean {
     const key = name.trim().toLowerCase()
-    return key !== '' && this.groupNames().some((g) => g.toLowerCase() === key)
+    return key !== '' && this.indexed().groupKeys.has(key)
   }
 
   /**
@@ -367,58 +187,10 @@ export class WorkspaceStore {
     await this.persist()
   }
 
-  /** Capture the live workspace arrangement. */
-  capture(): WorkspaceLayoutSnapshot {
-    const snapshot = this.projectSnapshot(this.api.workspace.captureLayout())
-    const pluginViewStates = this.captureProviderStates(snapshot)
-    return pluginViewStates.length > 0 ? { ...snapshot, pluginViewStates } : snapshot
-  }
-
-  /** Capture for persistence, retaining an unavailable provider's opaque state. */
-  captureForSave(prior?: WorkspaceLayoutSnapshot): WorkspaceLayoutSnapshot {
-    const snapshot = this.capture()
-    const current = new Map((snapshot.pluginViewStates ?? []).map((entry) => [stateKey(entry), entry]))
-    for (const entry of this.projectSnapshot(prior ?? snapshot).pluginViewStates ?? []) {
-      if (current.has(stateKey(entry))) continue
-      if (!ownerPresent(snapshot, entry.surface, entry.owner)) continue
-      current.set(stateKey(entry), entry)
-    }
-    const pluginViewStates = normalizePluginViewStates([...current.values()])
-    return pluginViewStates ? { ...snapshot, pluginViewStates } : snapshot
-  }
-
-  isCurrent(snapshot: WorkspaceLayoutSnapshot): boolean {
-    const live = this.capture()
-    const available = new Set(this.providers().map((provider) => providerKey(provider.owner, provider.extension)))
-    const saved = this.projectSnapshot(snapshot)
-    const comparable: WorkspaceLayoutSnapshot = { ...live, ...saved }
-    if (saved.pluginViewStates) {
-      const states = new Map((live.pluginViewStates ?? []).map((entry) => [stateKey(entry), entry]))
-      for (const entry of saved.pluginViewStates) {
-        if (available.has(stateKey(entry))) states.set(stateKey(entry), entry)
-      }
-      const pluginViewStates = normalizePluginViewStates([...states.values()])
-      if (pluginViewStates) comparable.pluginViewStates = pluginViewStates
-      else delete comparable.pluginViewStates
-    }
-    return structuralSnapshotKey(live) === structuralSnapshotKey(comparable)
-  }
-
-  /** Restore an arrangement into the live workspace. */
-  applySnapshot(snapshot: WorkspaceLayoutSnapshot): void {
-    const projected = this.projectSnapshot(snapshot)
-    this.api.workspace.applyLayout(projected)
-    const saved = new Map((projected.pluginViewStates ?? []).map((entry) => [stateKey(entry), entry]))
-    for (const provider of this.providers()) {
-      const entry = saved.get(providerKey(provider.owner, provider.extension))
-      if (!entry || !ownerPresent(projected, entry.surface, entry.owner)) continue
-      try {
-        provider.extension.restore(entry.state)
-      } catch {
-        // Provider restoration is isolated from the host layout and its peers.
-      }
-    }
-  }
+  capture(): WorkspaceLayoutSnapshot { return this.layoutState.capture() }
+  captureForSave(prior?: WorkspaceLayoutSnapshot): WorkspaceLayoutSnapshot { return this.layoutState.captureForSave(prior) }
+  isCurrent(snapshot: WorkspaceLayoutSnapshot): boolean { return this.layoutState.isCurrent(snapshot) }
+  applySnapshot(snapshot: WorkspaceLayoutSnapshot): void { this.layoutState.applySnapshot(snapshot) }
 
   /** Capture the live arrangement and save it under `name` (the panel's Save). */
   async saveCurrent(name: string, group = ''): Promise<SavedLayout> {
@@ -447,8 +219,11 @@ export class WorkspaceStore {
 
   /** Insert or replace a layout by name, then persist + notify. */
   async upsert(layout: SavedLayout): Promise<void> {
-    const next = this.layouts.filter((l) => l.name.toLowerCase() !== layout.name.toLowerCase())
-    next.push(layout)
+    let owned: SavedLayout
+    try { owned = JSON.parse(JSON.stringify(layout)) }
+    catch (error) { return this.repository.reject(error) }
+    const next = this.layouts.filter((l) => l.name.toLowerCase() !== owned.name.toLowerCase())
+    next.push(owned)
     next.sort((a, b) => a.name.localeCompare(b.name))
     this.layouts = next
     await this.persist()
@@ -493,7 +268,7 @@ export class WorkspaceStore {
     const key = name.trim().toLowerCase()
     const idx = this.layouts.findIndex((l) => l.name.toLowerCase() === key)
     if (idx === -1) throw new Error(`No saved layout named "${name}".`)
-    this.layouts[idx] = { ...this.layouts[idx], group: group.trim() }
+    this.layouts = this.layouts.map((layout, index) => index === idx ? { ...layout, group: group.trim() } : layout)
     await this.persist()
   }
 
@@ -528,55 +303,7 @@ export class WorkspaceStore {
     this.notify()
   }
 
-  private async persist(): Promise<void> {
-    const run = async (): Promise<void> => {
-      const [oldLayouts, oldGroups] = await Promise.all([
-        this.readDataset(LAYOUTS_DATASET),
-        this.readDataset(GROUPS_DATASET)
-      ])
-      await this.api.data.transaction([
-        ...oldLayouts.map((row) => ({
-          dataset: LAYOUTS_DATASET, operation: 'delete' as const, key: { name: String(row.name) }
-        })),
-        ...oldGroups.map((row) => ({
-          dataset: GROUPS_DATASET, operation: 'delete' as const, key: { name: String(row.name) }
-        })),
-        ...this.layouts.map((layout) => ({
-          dataset: LAYOUTS_DATASET,
-          operation: 'insert' as const,
-          values: {
-            name: layout.name,
-            group: layout.group,
-            snapshotVersion: 1,
-            snapshot: layout.snapshot as unknown as DatasetRecord,
-            createdAt: layout.createdAt,
-            modifiedAt: layout.modifiedAt
-          }
-        })),
-        ...this.declaredGroups.map((name, position) => ({
-          dataset: GROUPS_DATASET, operation: 'insert' as const, values: { name, position }
-        }))
-      ])
-      this.notify()
-    }
-    const next = this.persistQueue.then(run, run)
-    this.persistQueue = next.then(
-      () => { this.persistFailure = null },
-      (reason) => { this.persistFailure = { reason } }
-    )
-    return next
-  }
-
-  private async readDataset(dataset: string): Promise<DatasetRecord[]> {
-    const rows: DatasetRecord[] = []
-    let cursor: string | undefined
-    do {
-      const page = await this.api.data.dataset(dataset).query({ limit: 1000, cursor })
-      rows.push(...page.rows)
-      cursor = page.cursor
-    } while (cursor)
-    return rows
-  }
+  private persist(): Promise<void> { return this.repository.save(this.layouts, this.declaredGroups) }
 
   subscribe(cb: () => void): () => void {
     this.listeners.add(cb)
@@ -584,34 +311,8 @@ export class WorkspaceStore {
   }
 
   private notify(): void {
+    if (this.disposed) return
     this.listeners.forEach((l) => l())
-  }
-}
-
-const asName = (value: unknown): string => (typeof value === 'string' ? value.trim() : '')
-
-/** Keep the first spelling of each group name, drop blanks and case-twins. */
-function dedupeGroups(names: string[]): string[] {
-  const seen = new Set<string>()
-  return names.filter((name) => {
-    const key = name.toLowerCase()
-    if (!name || seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
-}
-
-function normalize(record: Record<string, unknown>): SavedLayout | null {
-  const name = typeof record.name === 'string' ? record.name.trim() : ''
-  const snapshot = record.snapshot
-  if (!name || !snapshot || typeof snapshot !== 'object') return null
-  const now = Date.now()
-  return {
-    name,
-    group: typeof record.group === 'string' ? record.group : '',
-    snapshot: storedSnapshot(snapshot as WorkspaceLayoutSnapshot),
-    createdAt: typeof record.createdAt === 'number' ? record.createdAt : now,
-    modifiedAt: typeof record.modifiedAt === 'number' ? record.modifiedAt : now
   }
 }
 

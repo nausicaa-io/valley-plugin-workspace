@@ -1,6 +1,7 @@
 {
   "icon": "panels-top-left",
   "main": "runtime/index.js",
+  "indexState": "scoped",
   "uiSlots": {
     "left_sidebar": "workspace.panel",
     "footer": "workspace.footer"
