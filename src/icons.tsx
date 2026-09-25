@@ -131,3 +131,65 @@ export const trashIcon = (size = 14, color = 'var(--text-secondary)'): Element =
     size,
     color
   )
+
+/** Remix fill icon (24×24), the family the app's Appearance layout pages use. */
+const fillIcon = (d: string, size: number, color: string): Element =>
+  h(
+    'svg',
+    {
+      width: size,
+      height: size,
+      viewBox: '0 0 24 24',
+      fill: 'currentColor',
+      style: { color, flexShrink: 0, display: 'block' }
+    },
+    h('path', { d })
+  )
+
+// ── Saved layout parts: the same glyphs as Appearance → Icon Rail / Footer Rail ──
+/** react-icons/ri `RiLayoutRightLine` — the right sidebar. */
+export const rightSidebarIcon = (size = 14, color = 'currentColor'): Element =>
+  fillIcon(
+    'M21 3C21.5523 3 22 3.44772 22 4V20C22 20.5523 21.5523 21 21 21H3C2.44772 21 2 20.5523 2 20V4C2 3.44772 2.44772 3 3 3H21ZM15 5H4V19H15V5ZM20 5H17V19H20V5Z',
+    size,
+    color
+  )
+/** react-icons/ri `RiLayoutLeftLine` — the Icon Rail. */
+export const iconRailIcon = (size = 14, color = 'currentColor'): Element =>
+  fillIcon(
+    'M21 3C21.5523 3 22 3.44772 22 4V20C22 20.5523 21.5523 21 21 21H3C2.44772 21 2 20.5523 2 20V4C2 3.44772 2.44772 3 3 3H21ZM7 5H4V19H7V5ZM20 5H9V19H20V5Z',
+    size,
+    color
+  )
+/** react-icons/ri `RiLayoutBottomLine` — the footer. */
+export const footerIcon = (size = 14, color = 'currentColor'): Element =>
+  fillIcon(
+    'M21 3C21.5523 3 22 3.44772 22 4V20C22 20.5523 21.5523 21 21 21H3C2.44772 21 2 20.5523 2 20V4C2 3.44772 2.44772 3 3 3H21ZM4 16V19H20V16H4ZM4 14H20V5H4V14Z',
+    size,
+    color
+  )
+/** react-icons/ri `RiMoreFill` — a row's overflow menu. */
+export const moreIcon = (size = 16, color = 'currentColor'): Element =>
+  fillIcon(
+    'M5 10C3.9 10 3 10.9 3 12C3 13.1 3.9 14 5 14C6.1 14 7 13.1 7 12C7 10.9 6.1 10 5 10ZM19 10C17.9 10 17 10.9 17 12C17 13.1 17.9 14 19 14C20.1 14 21 13.1 21 12C21 10.9 20.1 10 19 10ZM12 10C10.9 10 10 10.9 10 12C10 13.1 10.9 14 12 14C13.1 14 14 13.1 14 12C14 10.9 13.1 10 12 10Z',
+    size,
+    color
+  )
+/** Lucide `copy` — Duplicate. */
+export const copyIcon = (size = 14, color = 'var(--text-secondary)'): Element =>
+  lineIcon(
+    ['M10 8h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2Z', 'M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2'],
+    size,
+    color
+  )
+/** Lucide `layers` — the Includes submenu. */
+export const layersIcon = (size = 14, color = 'var(--text-secondary)'): Element =>
+  lineIcon(
+    [
+      'm12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z',
+      'm22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65',
+      'm22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65'
+    ],
+    size,
+    color
+  )

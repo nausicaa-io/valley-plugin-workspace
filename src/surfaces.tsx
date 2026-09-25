@@ -4,12 +4,13 @@ import { React, api } from './runtime'
 import { getStore } from './store'
 import { uiText } from './localization'
 
-interface WorkspaceView { query: string; selected: string | null; managerOpen: boolean }
-interface SurfaceState { views: Map<SlotId, WorkspaceView>; listeners: Set<() => void> }
-function state(): SurfaceState { return api.runtime.getOrCreate('workspace.surfaces', () => ({ views: new Map(), listeners: new Set() })) }
+export type ManagerFocus = 'search' | 'save'
+interface WorkspaceView { query: string; selected: string | null; managerOpen: boolean; managerFocus: ManagerFocus }
+interface SurfaceState { views: Map<SlotId, WorkspaceView>; listeners: Set<() => void>; footerMounts: number }
+function state(): SurfaceState { return api.runtime.getOrCreate('workspace.surfaces', () => ({ views: new Map(), listeners: new Set(), footerMounts: 0 })) }
 function view(surface: SlotId): WorkspaceView {
   let value = state().views.get(surface)
-  if (!value) { value = { query: '', selected: null, managerOpen: false }; state().views.set(surface, value) }
+  if (!value) { value = { query: '', selected: null, managerOpen: false, managerFocus: 'search' }; state().views.set(surface, value) }
   return value
 }
 function subscribe(listener: () => void): () => void {
@@ -19,6 +20,24 @@ function subscribe(listener: () => void): () => void {
 }
 function notify(): void { state().listeners.forEach((listener) => listener()) }
 export function patchWorkspaceSurface(surface: SlotId, patch: Partial<WorkspaceView>): void { Object.assign(view(surface), patch); notify() }
+/** Count a mounted footer chip, which is what renders the manager modal. */
+export function useFooterMount(): void {
+  React.useEffect(() => {
+    state().footerMounts += 1
+    return () => { state().footerMounts -= 1 }
+  }, [])
+}
+
+/**
+ * Open the manager modal behind the footer chip. Returns false when no footer
+ * chip is mounted (the user hid it), so the caller can fall back to the panel.
+ */
+export function openManager(focus: ManagerFocus): boolean {
+  if (state().footerMounts <= 0) return false
+  patchWorkspaceSurface('footer', { managerOpen: true, managerFocus: focus })
+  return true
+}
+
 export function useWorkspaceSurface(surface: SlotId): WorkspaceView {
   const [, update] = React.useReducer((n: number) => n + 1, 0)
   React.useEffect(() => subscribe(update), [])

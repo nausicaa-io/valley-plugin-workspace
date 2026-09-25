@@ -14,10 +14,10 @@
  */
 import type { ValleyPluginApi } from '@valley/plugin-sdk'
 import type { WorkspaceLayoutSnapshot } from '@valley/plugin-sdk/types'
-import { WorkspaceLayoutState } from './layoutState'
+import { WorkspaceLayoutState, projectSnapshot, scopesOf, type LayoutScope, type LayoutScopes } from './layoutState'
 import { WorkspaceRepository, GROUPS_DATASET, LAYOUTS_DATASET, dedupeGroups, normalizeLayout, type SavedLayout } from './repository'
 export type { SavedLayout } from './repository'
-export { structuralSnapshotKey } from './layoutState'
+export { structuralSnapshotKey, layoutCounts, scopesOf, LAYOUT_SCOPES, type LayoutScope, type LayoutScopes } from './layoutState'
 import { api as runtimeApi, initRuntime } from './runtime'
 
 const STORE_KEY = 'workspace.store'
@@ -187,25 +187,66 @@ export class WorkspaceStore {
     await this.persist()
   }
 
-  capture(): WorkspaceLayoutSnapshot { return this.layoutState.capture() }
-  captureForSave(prior?: WorkspaceLayoutSnapshot): WorkspaceLayoutSnapshot { return this.layoutState.captureForSave(prior) }
+  capture(scopes?: LayoutScopes): WorkspaceLayoutSnapshot { return this.layoutState.capture(scopes) }
+  captureForSave(scopes: LayoutScopes, prior?: WorkspaceLayoutSnapshot): WorkspaceLayoutSnapshot { return this.layoutState.captureForSave(scopes, prior) }
+  defaultScopes(): LayoutScopes { return this.layoutState.defaultScopes() }
   isCurrent(snapshot: WorkspaceLayoutSnapshot): boolean { return this.layoutState.isCurrent(snapshot) }
   applySnapshot(snapshot: WorkspaceLayoutSnapshot): void { this.layoutState.applySnapshot(snapshot) }
 
-  /** Capture the live arrangement and save it under `name` (the panel's Save). */
-  async saveCurrent(name: string, group = ''): Promise<SavedLayout> {
+  /**
+   * Capture the live arrangement and save it under `name`, then make it active.
+   * Replacing an existing layout keeps its group and its saved parts unless the
+   * caller names new ones; a new layout starts from the settings' defaults.
+   */
+  async saveCurrent(name: string, group?: string, scopes?: LayoutScopes): Promise<SavedLayout> {
     const prior = this.find(name)
     const now = Date.now()
+    const chosen = scopes ?? (prior ? scopesOf(prior.snapshot) : this.defaultScopes())
     const layout: SavedLayout = {
       name,
-      group,
-      snapshot: this.captureForSave(prior?.snapshot),
+      group: group?.trim() || prior?.group || '',
+      snapshot: this.captureForSave(chosen, prior?.snapshot),
       createdAt: prior?.createdAt ?? now,
       modifiedAt: now
     }
     await this.upsert(layout)
     await this.setActive(name)
     return layout
+  }
+
+  /** Copy a layout under the first free "<name> copy" name; the copy stays inactive. */
+  async duplicate(name: string, copyLabel: (base: string, n: number) => string): Promise<SavedLayout> {
+    const source = this.find(name)
+    if (!source) throw new Error(`No saved layout named "${name}".`)
+    let n = 1
+    let next = copyLabel(source.name, n)
+    while (this.find(next)) next = copyLabel(source.name, ++n)
+    const now = Date.now()
+    const copy: SavedLayout = { ...source, name: next, createdAt: now, modifiedAt: now }
+    await this.upsert(copy)
+    return copy
+  }
+
+  /**
+   * Add or drop one optional part of a saved layout. Adding captures that part
+   * from the live workspace; dropping removes it, so loading the layout leaves
+   * that part of the live workspace alone.
+   */
+  async setScope(name: string, scope: LayoutScope, included: boolean): Promise<SavedLayout> {
+    const prior = this.find(name)
+    if (!prior) throw new Error(`No saved layout named "${name}".`)
+    const kept = projectSnapshot(prior.snapshot, { ...scopesOf(prior.snapshot), [scope]: included })
+    const snapshot = included ? this.layoutState.withLivePart(kept, scope) : kept
+    const next: SavedLayout = { ...prior, snapshot, modifiedAt: Date.now() }
+    await this.upsert(next)
+    return next
+  }
+
+  /** Re-capture any saved layout from the live workspace, keeping its parts and group. */
+  replaceWithCurrent(name: string): Promise<SavedLayout> {
+    const target = this.find(name)
+    if (!target) return Promise.reject(new Error(`No saved layout named "${name}".`))
+    return this.saveCurrent(target.name, target.group)
   }
 
   /** Restore a saved layout into the live workspace (the panel's Load). */

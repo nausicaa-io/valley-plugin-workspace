@@ -1,19 +1,22 @@
 import type { KeyboardEvent } from 'react'
 import { React, api } from './runtime'
-import { getStore, type SavedLayout } from './store'
+import { getStore, scopesOf, type LayoutScopes, type SavedLayout } from './store'
 import { uiText } from './localization'
 import { patchWorkspaceSurface, useWorkspaceSurface } from './surfaces'
-import { chevronDownIcon, chevronRightIcon, clearIcon, folderIcon, searchIcon } from './icons'
+import { chevronDownIcon, chevronRightIcon, clearIcon, folderIcon, moreIcon, searchIcon } from './icons'
 import {
   SANS,
   ago,
   confirmDelete,
+  countsLabel,
+  failureText,
   fieldStyle,
-  groupChip,
   groupField,
   openGroupMenu,
   openLayoutMenu,
-  pill
+  pill,
+  scopeBadges,
+  scopeToggles
 } from './ui'
 
 /**
@@ -22,8 +25,12 @@ import {
  * Grouped like the sidebar panel (collapsible headers + counts), searchable, and
  * keyboard-first: ↑/↓ walk the visible rows, Enter loads the highlighted one,
  * Backspace/Delete deletes it. A row *is* the load action (there is no separate
- * `Load` button); `⋯` holds rename / move to group / save / delete and `✕`
- * deletes.
+ * `Load` button); `⋯` holds rename / move to group / replace / duplicate /
+ * included parts / delete and `✕` deletes.
+ *
+ * The modal grows with its content. Once the host caps it (90% of the window),
+ * this frame scrolls and the save/search header stays pinned with `sticky`;
+ * viewport units would measure this self-sizing frame, not the window.
  * Escape, Tab-trapping and backdrop dismissal come from the host `api.ui.Modal`
  * that renders this.
  */
@@ -40,6 +47,10 @@ export const ManageModal = ({
   const [, force] = React.useState(0)
   const [saveName, setSaveName] = React.useState('')
   const [saveGroup, setSaveGroup] = React.useState('')
+  const [chosenScopes, setChosenScopes] = React.useState<LayoutScopes | null>(null)
+  const [error, setError] = React.useState<string | null>(null)
+  const rootRef = React.useRef<HTMLDivElement>(null)
+  const headerRef = React.useRef<HTMLDivElement>(null)
   const { query } = useWorkspaceSurface('footer')
   const setQuery = (query: string): void => patchWorkspaceSurface('footer', { query })
   const [highlight, setHighlight] = React.useState(0)
@@ -61,9 +72,20 @@ export const ManageModal = ({
     }
   }, [])
 
+  // Rows scrolled into view by the keyboard stop below the pinned header.
+  React.useLayoutEffect(() => {
+    const height = headerRef.current?.offsetHeight ?? 0
+    rootRef.current?.style.setProperty('--workspace-header-height', `${height}px`)
+  })
+
   const s = getStore()
   if (!s) return null
   const active = s.active
+  const fail = (e: unknown): void => setError(failureText(e))
+  const existing = saveName.trim() ? s.find(saveName.trim()) : undefined
+  // Until the user picks parts, the toggles show what saving would keep: the
+  // named layout's own parts when replacing it, else the settings' defaults.
+  const saveScopes = chosenScopes ?? (existing ? scopesOf(existing.snapshot) : s.defaultScopes())
 
   const q = query.trim().toLowerCase()
   const searching = q.length > 0
@@ -79,30 +101,34 @@ export const ManageModal = ({
   const showGroupHeaders = groups.length > 1 || (groups[0]?.group ?? '') !== ''
 
   const label = (group: string): string => group || uiText('auto.a7746fee0fd8')
-  const isCollapsed = (group: string): boolean => !searching && collapsed[label(group)] === true
+  // Keyed apart from any label, so a real group named "Ungrouped" collapses on its own.
+  const collapseKey = (group: string): string => (group ? `g:${group.toLowerCase()}` : 'ungrouped')
+  const isCollapsed = (group: string): boolean => !searching && collapsed[collapseKey(group)] === true
   // The flat, visible order the arrow keys walk (collapsed groups are skipped).
   const visibleRows = groups.flatMap((g) => (isCollapsed(g.group) ? [] : g.layouts))
   const clampedHighlight = visibleRows.length === 0 ? -1 : Math.min(highlight, visibleRows.length - 1)
 
   const load = (layout: SavedLayout): void => {
     patchWorkspaceSurface('footer', { selected: layout.name })
-    void s.loadByName(layout.name).then(onClose)
+    void s.loadByName(layout.name).then(onClose, fail)
   }
 
   const doSave = (): void => {
     const trimmed = saveName.trim()
     if (!trimmed) return
-    void s.saveCurrent(trimmed, saveGroup.trim()).then(() => {
+    setError(null)
+    void s.saveCurrent(trimmed, saveGroup.trim(), saveScopes).then(() => {
       setSaveName('')
       setSaveGroup('')
-    })
+      setChosenScopes(null)
+    }, fail)
   }
 
   const commitRename = (oldName: string): void => {
     const next = renameDraft.trim()
     setRenaming(null)
     if (!next || next === oldName) return
-    void s.renameByName(oldName, next).catch(() => undefined)
+    void s.renameByName(oldName, next).catch(fail)
   }
 
   const startGroupRename = (groupKey: string): void => {
@@ -114,7 +140,7 @@ export const ManageModal = ({
     const next = groupRenameDraft.trim()
     setGroupRenaming(null)
     if (!next || next === oldGroup) return
-    void s.renameGroup(oldGroup, next).catch(() => undefined)
+    void s.renameGroup(oldGroup, next).catch(fail)
   }
 
   // Same group actions as the sidebar panel (see `index.tsx`): naming an unknown
@@ -123,7 +149,7 @@ export const ManageModal = ({
     setSaveGroup(next)
     const trimmed = next.trim()
     if (!trimmed || s.hasGroup(trimmed)) return
-    void s.createGroup(trimmed).catch(() => undefined)
+    void s.createGroup(trimmed).catch(fail)
   }
 
   const openHeaderMenu = (groupKey: string, target: HTMLElement | { x: number; y: number }): void =>
@@ -142,6 +168,8 @@ export const ManageModal = ({
       const index = (next + visibleRows.length) % visibleRows.length
       setHighlight(index)
       patchWorkspaceSurface('footer', { selected: visibleRows[index].name })
+      const row = rootRef.current?.querySelector(`[data-row-index="${index}"]`)
+      row?.scrollIntoView?.({ block: 'nearest' })
     }
     if (event.key === 'ArrowDown') return move(clampedHighlight + 1)
     if (event.key === 'ArrowUp') return move(clampedHighlight <= 0 ? visibleRows.length - 1 : clampedHighlight - 1)
@@ -160,10 +188,11 @@ export const ManageModal = ({
     }
   }
 
-  // ── Save row: name + group dropdown + Save ─────────────────────────────────
+  // ── Save row: name + group dropdown + Save, then the parts to include ────
+  const canSave = saveName.trim().length > 0
   const saveRow = React.createElement(
     'div',
-    { style: { display: 'flex', alignItems: 'center', gap: '10px', paddingBottom: '12px' } },
+    { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
     React.createElement('input', {
       value: saveName,
       placeholder: uiText('auto.21679e71f164'),
@@ -176,11 +205,11 @@ export const ManageModal = ({
         event.preventDefault()
         doSave()
       },
-      style: { ...fieldStyle, height: '36px' }
+      style: { ...fieldStyle, height: '32px' }
     }),
     React.createElement(
       'div',
-      { style: { width: '180px', height: '36px', display: 'flex', flexShrink: 0 } },
+      { style: { width: '200px', display: 'flex', flexShrink: 0 } },
       groupField(saveGroup, chooseGroup)
     ),
     React.createElement(
@@ -188,25 +217,41 @@ export const ManageModal = ({
       {
         type: 'button',
         onClick: doSave,
-        disabled: saveName.trim().length === 0,
+        disabled: !canSave,
         style: {
-          height: '36px',
+          height: '32px',
+          minWidth: '72px',
           padding: '0 14px',
           flexShrink: 0,
-          border: '1px solid var(--border-light)',
+          border: `1px solid ${canSave ? 'var(--accent-color)' : 'var(--border-light)'}`,
           borderRadius: '6px',
-          background: 'var(--surface-color)',
-          color: 'var(--text-color)',
-          boxShadow: '0 2px 5px rgba(0, 0, 0, 0.12)',
+          background: canSave ? 'var(--accent-color)' : 'transparent',
+          color: canSave ? 'var(--accent-contrast)' : 'var(--text-secondary)',
           fontFamily: SANS,
-          fontSize: '0.8125rem',
-          cursor: saveName.trim() ? 'pointer' : 'default',
-          opacity: saveName.trim() ? 1 : 0.55
+          fontSize: 'var(--small-font-size)',
+          fontWeight: 600,
+          cursor: canSave ? 'pointer' : 'default',
+          opacity: canSave ? 1 : 0.7
         }
       },
-      uiText('auto.efc007a393f6')
+      existing ? uiText('auto.a7cf7b25a703') : uiText('auto.efc007a393f6')
     )
   )
+  const scopeRow = React.createElement(
+    'div',
+    { style: { paddingTop: '10px' } },
+    scopeToggles(saveScopes, setChosenScopes)
+  )
+  const errorRow = error
+    ? React.createElement(
+        'div',
+        {
+          role: 'alert',
+          style: { paddingTop: '8px', fontFamily: SANS, fontSize: 'var(--small-font-size)', color: 'var(--danger-tint-text)' }
+        },
+        error
+      )
+    : null
 
   // ── Search row (also the keyboard-nav driver, so it takes initial focus) ────
   const searchRow = React.createElement(
@@ -216,7 +261,7 @@ export const ManageModal = ({
         display: 'flex',
         alignItems: 'center',
         gap: '6px',
-        margin: '12px 0 4px',
+        marginTop: '12px',
         padding: '7px 10px',
         border: '1px solid var(--border-light)',
         borderRadius: '6px',
@@ -245,7 +290,7 @@ export const ManageModal = ({
         background: 'none',
         outline: 'none',
         fontFamily: SANS,
-        fontSize: '0.8125rem',
+        fontSize: 'var(--small-font-size)',
         color: 'var(--text-color)'
       }
     }),
@@ -297,8 +342,6 @@ export const ManageModal = ({
           borderRadius: '6px',
           background: 'transparent',
           color: 'var(--text-secondary)',
-          fontFamily: SANS,
-          fontSize: '1rem',
           lineHeight: 1,
           padding: 0,
           cursor: 'pointer'
@@ -314,7 +357,8 @@ export const ManageModal = ({
       onRename: () => {
         setRenameDraft(layout.name)
         setRenaming(layout.name)
-      }
+      },
+      onError: fail
     })
   }
 
@@ -340,15 +384,15 @@ export const ManageModal = ({
               setRenaming(null)
             }
           },
-          style: { ...fieldStyle, padding: '4px 8px', fontSize: '0.875rem', fontWeight: 600 }
+          style: { ...fieldStyle, padding: '4px 8px', fontSize: '0.8125rem', fontWeight: 600 }
         })
       : React.createElement(
           'span',
           {
             style: {
               fontFamily: SANS,
-              fontSize: '0.875rem',
-              fontWeight: 500,
+              fontSize: '0.8125rem',
+              fontWeight: 600,
               color: 'var(--text-color)',
               overflow: 'hidden',
               textOverflow: 'ellipsis',
@@ -360,8 +404,23 @@ export const ManageModal = ({
 
     const meta = React.createElement(
       'span',
-      { style: { fontFamily: SANS, fontSize: '0.6875rem', color: 'var(--text-secondary)' } },
-      uiText('auto.7a9c4f78c9b7', { p0: ago(layout.modifiedAt) })
+      {
+        style: {
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          minWidth: 0,
+          fontFamily: SANS,
+          fontSize: '0.6875rem',
+          color: 'var(--text-secondary)'
+        }
+      },
+      React.createElement(
+        'span',
+        { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+        `${uiText('auto.7a9c4f78c9b7', { p0: ago(layout.modifiedAt) })} · ${countsLabel(layout)}`
+      ),
+      scopeBadges(layout)
     )
 
     const body = React.createElement(
@@ -371,8 +430,8 @@ export const ManageModal = ({
         'div',
         { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
         nameEl,
-        isActive ? pill(uiText('auto.a733b809d2f1')) : null,
-        layout.group ? groupChip(layout.group) : null
+        isActive ? pill(uiText('auto.a733b809d2f1')) : null
+        // No group chip: every row already sits under its group header.
       ),
       meta
     )
@@ -386,7 +445,7 @@ export const ManageModal = ({
           {
             type: 'button',
             'aria-label': uiText('auto.fc4a5bfcb64a', { p0: layout.name }),
-            'aria-selected': highlighted,
+            'aria-current': isActive ? 'true' : undefined,
             onClick: () => load(layout),
             onMouseEnter: () => setHighlight(index),
             style: {
@@ -409,6 +468,8 @@ export const ManageModal = ({
       {
         key: layout.name,
         'data-testid': `workspace-switcher-row-${layout.name}`,
+        'data-row-index': index,
+        'data-highlighted': highlighted ? 'true' : undefined,
         // Right-click opens the same menu as `⋯`, at the pointer.
         onContextMenu: (e: {
           preventDefault: () => void
@@ -426,7 +487,9 @@ export const ManageModal = ({
           display: 'flex',
           alignItems: 'center',
           gap: '2px',
+          paddingRight: '4px',
           borderRadius: '7px',
+          scrollMarginTop: 'calc(var(--workspace-header-height, 0px) + 4px)',
           background: highlighted ? 'var(--hover-bg)' : 'transparent'
         }
       },
@@ -441,7 +504,7 @@ export const ManageModal = ({
             openRowMenu(layout, event.currentTarget)
           }
         },
-        '⋯'
+        moreIcon(16)
       ),
       iconButton(
         'delete',
@@ -450,7 +513,7 @@ export const ManageModal = ({
           ariaLabel: uiText('auto.a589e1949a7a', { p0: layout.name }),
           onClick: () => void confirmDelete(layout)
         },
-        clearIcon(16)
+        clearIcon(14, 'currentColor')
       )
     )
   }
@@ -508,7 +571,7 @@ export const ManageModal = ({
           'button',
           {
             type: 'button',
-            onClick: () => setCollapsed((prev) => ({ ...prev, [groupLabel]: !prev[groupLabel] })),
+            onClick: () => setCollapsed((prev) => ({ ...prev, [collapseKey(g.group)]: !prev[collapseKey(g.group)] })),
             onContextMenu: (event: {
               preventDefault: () => void
               stopPropagation: () => void
@@ -600,28 +663,35 @@ export const ManageModal = ({
       message
     )
 
+  const hasContent = s.layouts.length > 0 || s.groups().length > 0
+  // Pinned while the frame scrolls; the modal surface behind it hides the rows
+  // passing underneath.
+  const header = React.createElement(
+    'div',
+    {
+      ref: headerRef,
+      style: { position: 'sticky', top: 0, zIndex: 2, background: 'var(--modal-bg)', paddingBottom: '6px' }
+    },
+    saveRow,
+    scopeRow,
+    errorRow,
+    React.createElement('div', { style: { height: '1px', background: 'var(--border-light)', marginTop: '12px' } }),
+    hasContent ? searchRow : null
+  )
+
   return React.createElement(
     'div',
     {
+      ref: rootRef,
       'data-testid': 'workspace-switcher',
       onKeyDown,
-      style: { display: 'flex', flexDirection: 'column', minHeight: '120px', fontFamily: SANS }
+      style: { display: 'flex', flexDirection: 'column', minHeight: '320px', fontFamily: SANS }
     },
-    saveRow,
-    React.createElement('div', { style: { height: '1px', background: 'var(--border-light)' } }),
-    s.layouts.length === 0 && s.groups().length === 0
+    header,
+    !hasContent
       ? emptyState(uiText('auto.4948447e8d49'))
-      : React.createElement(
-          React.Fragment,
-          null,
-          searchRow,
-          groups.length === 0
-            ? emptyState(uiText('auto.4d6963a6dfbc', { p0: query.trim() }))
-            : React.createElement(
-                'div',
-                { style: { display: 'flex', flexDirection: 'column', maxHeight: '52vh', overflowY: 'auto' } },
-                ...groupBlocks
-              )
-        )
+      : groups.length === 0
+        ? emptyState(uiText('auto.4d6963a6dfbc', { p0: query.trim() }))
+        : React.createElement('div', { style: { display: 'flex', flexDirection: 'column' } }, ...groupBlocks)
   )
 }

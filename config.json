@@ -26,31 +26,31 @@
   "settingsSchema": {
     "fields": [
       {
+        "key": "saveRightSidebarState",
+        "label": "Include right sidebar in new layouts",
+        "labelKey": "plugin.workspace.setting.saveRightSidebarState",
+        "type": "boolean",
+        "default": true,
+        "description": "New layouts save the right sidebar's visibility, width, panels, splits, selection, and participating plugin views. Each layout can change this while saving or from its Includes menu.",
+        "descriptionKey": "plugin.workspace.setting.saveRightSidebarStateDesc"
+      },
+      {
         "key": "saveIconRail",
-        "label": "Save Icon Rail",
+        "label": "Include Icon Rail in new layouts",
         "labelKey": "plugin.workspace.setting.saveIconRail",
         "type": "boolean",
-        "default": false,
-        "description": "Include Icon Rail visibility, panel order, and hidden items in workspace layouts.",
+        "default": true,
+        "description": "New layouts save Icon Rail visibility, panel order, and hidden items. Each layout can change this while saving or from its Includes menu.",
         "descriptionKey": "plugin.workspace.setting.saveIconRailDesc"
       },
       {
         "key": "saveFooterRail",
-        "label": "Save Footer Rail",
+        "label": "Include footer in new layouts",
         "labelKey": "plugin.workspace.setting.saveFooterRail",
         "type": "boolean",
         "default": false,
-        "description": "Include Footer Rail visibility and left, right, and hidden item arrangement in workspace layouts.",
+        "description": "New layouts save footer visibility and the left, right, and hidden item arrangement. Each layout can change this while saving or from its Includes menu.",
         "descriptionKey": "plugin.workspace.setting.saveFooterRailDesc"
-      },
-      {
-        "key": "saveRightSidebarState",
-        "label": "Save right sidebar state",
-        "labelKey": "plugin.workspace.setting.saveRightSidebarState",
-        "type": "boolean",
-        "default": true,
-        "description": "Include the right sidebar's visibility, width, panels, splits, selection, and participating plugin views.",
-        "descriptionKey": "plugin.workspace.setting.saveRightSidebarStateDesc"
       }
     ]
   },

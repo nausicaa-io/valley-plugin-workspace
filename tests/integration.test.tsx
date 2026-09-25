@@ -69,60 +69,91 @@ function scopedSnapshot(id: string): WorkspaceLayoutSnapshot {
 }
 
 describe('workspace scope settings and view-state providers', () => {
-  it('defaults to right-sidebar capture while Icon Rail and Footer Rail stay independent', async () => {
+  it('seeds new layouts with the right sidebar and Icon Rail, and the footer only when enabled', () => {
     const defaults = createMockValleyApi({ manifest: { id: 'workspace' } })
     vi.mocked(defaults.api.workspace.captureLayout).mockReturnValue(scopedSnapshot('default'))
     const defaultStore = createStore(defaults.api)
+    expect(defaultStore.defaultScopes()).toEqual({ rightSidebar: true, iconRail: true, footer: false })
     const captured = defaultStore.capture()
     expect(captured).toMatchObject({
       activePanel: 'test-plugin',
       rightSidebarVisible: true,
-      rightSidebarLayout: expect.objectContaining({ id: 'default-right' })
+      rightSidebarLayout: expect.objectContaining({ id: 'default-right' }),
+      railVisible: false,
+      panelOrder: ['test-plugin', 'files'],
+      hiddenPanelIds: ['search']
     })
-    expect(captured).not.toHaveProperty('railVisible')
     expect(captured).not.toHaveProperty('footerVisible')
+    expect(captured).not.toHaveProperty('footerLayout')
 
     const custom = createMockValleyApi({
       manifest: { id: 'workspace' },
-      settings: { saveIconRail: true, saveFooterRail: true, saveRightSidebarState: false }
+      settings: { saveIconRail: false, saveFooterRail: true, saveRightSidebarState: false }
     })
     vi.mocked(custom.api.workspace.captureLayout).mockReturnValue(scopedSnapshot('custom'))
     const customStore = createStore(custom.api)
     const projected = customStore.capture()
-    expect(projected).toMatchObject({
-      railVisible: false,
-      panelOrder: ['test-plugin', 'files'],
-      hiddenPanelIds: ['search'],
-      footerVisible: false,
-      footerLayout: { left: ['vault'], right: ['save'], hidden: ['player'] }
-    })
+    expect(projected).toMatchObject({ footerVisible: false, footerLayout: { left: ['vault'], right: ['save'], hidden: ['player'] } })
+    expect(projected).not.toHaveProperty('railVisible')
     expect(projected).not.toHaveProperty('rightSidebarVisible')
     expect(projected).not.toHaveProperty('rightSidebarLayout')
   })
 
-  it('compares and applies only enabled scopes', () => {
-    const mock = createMockValleyApi({
-      manifest: { id: 'workspace' },
-      settings: { saveIconRail: false, saveFooterRail: false, saveRightSidebarState: false }
-    })
+  it('saves, compares and applies exactly the parts each layout includes, whatever the settings say later', async () => {
+    const mock = createMockValleyApi({ manifest: { id: 'workspace' } })
     vi.mocked(mock.api.workspace.captureLayout).mockReturnValue(scopedSnapshot('same'))
     const store = createStore(mock.api)
-    const saved = {
-      ...scopedSnapshot('same'),
-      railVisible: true,
-      footerVisible: true,
-      rightSidebarVisible: false
-    }
-    expect(store.isCurrent(saved)).toBe(true)
+    await store.ensureLoaded()
+    const rails = await store.saveCurrent('Rails', '', { rightSidebar: false, iconRail: true, footer: true })
+    const plain = await store.saveCurrent('Plain', '', { rightSidebar: false, iconRail: false, footer: false })
+    expect(rails.snapshot).toMatchObject({ railVisible: false, footerLayout: { left: ['vault'], right: ['save'], hidden: ['player'] } })
+    expect(rails.snapshot).not.toHaveProperty('rightSidebarLayout')
+    expect(plain.snapshot).not.toHaveProperty('railVisible')
+    expect(plain.snapshot).not.toHaveProperty('footerLayout')
 
-    store.applySnapshot(saved)
-    expect(mock.api.workspace.applyLayout).toHaveBeenCalledWith({
-      layout: saved.layout,
-      activePaneId: saved.activePaneId,
-      leftSidebarWidth: saved.leftSidebarWidth,
-      leftSidebarVisible: saved.leftSidebarVisible,
-      activePanel: saved.activePanel
+    // A footer change only matters to the layout that saved the footer.
+    vi.mocked(mock.api.workspace.captureLayout).mockReturnValue({ ...scopedSnapshot('same'), footerVisible: true })
+    expect(store.isCurrent(plain.snapshot)).toBe(true)
+    expect(store.isCurrent(rails.snapshot)).toBe(false)
+
+    // Settings seed new layouts only; applying follows what each layout saved.
+    await mock.api.settings.set('saveFooterRail', false)
+    await mock.api.settings.set('saveIconRail', false)
+    store.applySnapshot(plain.snapshot)
+    expect(mock.api.workspace.applyLayout).toHaveBeenLastCalledWith({
+      layout: plain.snapshot.layout,
+      activePaneId: plain.snapshot.activePaneId,
+      leftSidebarWidth: plain.snapshot.leftSidebarWidth,
+      leftSidebarVisible: plain.snapshot.leftSidebarVisible,
+      activePanel: plain.snapshot.activePanel
     })
+    store.applySnapshot(rails.snapshot)
+    expect(mock.api.workspace.applyLayout).toHaveBeenLastCalledWith(expect.objectContaining({
+      railVisible: false,
+      panelOrder: ['test-plugin', 'files'],
+      footerVisible: false,
+      footerLayout: { left: ['vault'], right: ['save'], hidden: ['player'] }
+    }))
+    expect(vi.mocked(mock.api.workspace.applyLayout).mock.lastCall?.[0]).not.toHaveProperty('rightSidebarLayout')
+  })
+
+  it('ignores reading position when deciding whether a layout has unsaved changes', async () => {
+    const mock = createMockValleyApi({ manifest: { id: 'workspace' } })
+    const tab = { id: 'note', folderPath: 'Moss.md', kind: 'file' as const }
+    vi.mocked(mock.api.workspace.captureLayout).mockReturnValue(snapshot('read', { activeTabId: 'note', tabs: [tab] }))
+    const store = createStore(mock.api)
+    await store.ensureLoaded()
+    const saved = await store.saveCurrent('Reading')
+
+    vi.mocked(mock.api.workspace.captureLayout).mockReturnValue(
+      snapshot('read', { activeTabId: 'note', tabs: [{ ...tab, scrollTop: 900, viewState: { pdfPage: 4 } }] })
+    )
+    expect(store.isCurrent(saved.snapshot)).toBe(true)
+
+    vi.mocked(mock.api.workspace.captureLayout).mockReturnValue(
+      snapshot('read', { activeTabId: 'note', tabs: [{ ...tab, folderPath: 'Lichen.md' }] })
+    )
+    expect(store.isCurrent(saved.snapshot)).toBe(false)
   })
 
   it('preserves unavailable opaque provider state and restores it after the provider returns', () => {
@@ -138,7 +169,7 @@ describe('workspace scope settings and view-state providers', () => {
     }
     const stopProvider = mock.api.interop.extensions.provide(WORKSPACE_VIEW_STATE_V1, provider)
     const store = createStore(mock.api)
-    const first = store.captureForSave()
+    const first = store.captureForSave(store.defaultScopes())
     expect(first.pluginViewStates).toEqual([{
       owner: 'test-plugin',
       id: 'test.right',
@@ -147,7 +178,7 @@ describe('workspace scope settings and view-state providers', () => {
     }])
 
     stopProvider()
-    const preserved = store.captureForSave(first)
+    const preserved = store.captureForSave(store.defaultScopes(), first)
     expect(preserved.pluginViewStates).toEqual(first.pluginViewStates)
     store.applySnapshot(preserved)
     expect(restore).not.toHaveBeenCalled()
@@ -273,13 +304,13 @@ describe('workspace plugin commands', () => {
     await api.commands.execute(`${NS}:save`, { name: 'A', group: 'G1' })
     await api.commands.execute(`${NS}:save`, { name: 'B', group: 'G1' })
     await api.commands.execute(`${NS}:save`, { name: 'a' }) // overwrites 'A'
+    await api.commands.execute(`${NS}:save`, { name: 'C', group: 'G2' })
+    await api.commands.execute(`${NS}:save`, { name: 'c', group: 'G1' }) // overwrites 'C' into G1
 
     const store = getStore()!
-    expect(store.layouts.map((l) => l.name).sort()).toEqual(['B', 'a'])
-    const groups = store.groups()
-    // ungrouped sorts last; 'a' moved out of G1 by the overwrite.
-    expect(groups.find((g) => g.group === 'G1')?.layouts.map((l) => l.name)).toEqual(['B'])
-    expect(groups[groups.length - 1].group).toBe('')
+    expect(store.layouts.map((l) => l.name).sort()).toEqual(['B', 'a', 'c'])
+    // Re-saving without a group keeps the layout where it was; naming one moves it.
+    expect(store.groups().find((g) => g.group === 'G1')?.layouts.map((l) => l.name)).toEqual(['a', 'B', 'c'])
   })
 
   it('creates a group with no layout in it, persists it beside the layouts, and reverts', async () => {
@@ -454,10 +485,13 @@ describe('workspace plugin commands', () => {
     render(React.createElement(Footer as ComponentType))
     fireEvent.click(screen.getByRole('button', { name: 'Canopy' }))
 
-    // Groups are headed and each row names the group it is saved in.
+    // Groups are headed; a row doesn't repeat its group, but says what it holds.
     expect(screen.getByTestId('workspace-switcher-group-Fungi')).toBeInTheDocument()
     const deskRow = screen.getByTestId('workspace-switcher-row-Moss')
-    expect(within(deskRow).getByText('Plants')).toBeInTheDocument()
+    expect(within(deskRow).queryByText('Plants')).not.toBeInTheDocument()
+    expect(within(deskRow).getByText(/1 pane · 0 tabs/)).toBeInTheDocument()
+    const parts = within(deskRow).getByTestId('workspace-scopes-Moss')
+    expect([...parts.querySelectorAll('[data-scope]')].map((el) => el.getAttribute('data-scope'))).toEqual(['rightSidebar'])
 
     // Search narrows the list (and therefore what the arrow keys walk).
     const search = screen.getByPlaceholderText('Search layouts & groups')
@@ -488,6 +522,78 @@ describe('workspace plugin commands', () => {
         expect.objectContaining({ layout: expect.objectContaining({ id: 'moss' }) })
       )
     )
+  })
+
+  it('saves the chosen parts from the modal and replaces an existing layout in its own group', async () => {
+    const mock = createMockValleyApi({ manifest: { id: 'workspace' } })
+    vi.mocked(mock.api.workspace.captureLayout).mockReturnValue(scopedSnapshot('parts'))
+    register(mock.api)
+    await getStore()?.ensureLoaded()
+    const calls = (mock.api.registerView as unknown as { mock: { calls: [string, ComponentType][] } }).mock.calls
+    const Footer = calls.find(([id]) => id === 'workspace.footer')?.[1]
+    render(React.createElement(Footer as ComponentType))
+
+    // `workspace:manage` opens this modal while the footer chip is mounted.
+    await act(async () => { await mock.api.commands.execute('workspace:manage', undefined) })
+    const dialog = screen.getByRole('dialog', { name: 'Manage workspace layouts' })
+    expect(mock.api.workspace.revealOwnPanel).not.toHaveBeenCalled()
+
+    const toggle = (label: string): HTMLElement => within(dialog).getByRole('button', { name: label })
+    expect(toggle('Right sidebar')).toHaveAttribute('aria-pressed', 'true')
+    expect(toggle('Icon Rail')).toHaveAttribute('aria-pressed', 'true')
+    expect(toggle('Footer')).toHaveAttribute('aria-pressed', 'false')
+    fireEvent.click(toggle('Footer'))
+    fireEvent.click(toggle('Right sidebar'))
+
+    const name = within(dialog).getByPlaceholderText('Save current workspace layout as…')
+    fireEvent.change(name, { target: { value: 'Survey' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(getStore()?.find('Survey')).toBeDefined())
+    const saved = getStore()!.find('Survey')!.snapshot
+    expect(saved).toMatchObject({ railVisible: false, footerLayout: { left: ['vault'], right: ['save'], hidden: ['player'] } })
+    expect(saved).not.toHaveProperty('rightSidebarLayout')
+
+    // The toggles reset to the defaults after saving.
+    expect(toggle('Footer')).toHaveAttribute('aria-pressed', 'false')
+    expect(toggle('Right sidebar')).toHaveAttribute('aria-pressed', 'true')
+
+    // Typing an existing name offers Replace, shows that layout's parts and keeps its group.
+    await act(async () => { await getStore()?.setGroup('Survey', 'Field') })
+    fireEvent.change(name, { target: { value: 'survey' } })
+    expect(within(dialog).getByRole('button', { name: 'Replace' })).toBeInTheDocument()
+    expect(toggle('Footer')).toHaveAttribute('aria-pressed', 'true')
+    expect(toggle('Right sidebar')).toHaveAttribute('aria-pressed', 'false')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Replace' }))
+    await waitFor(() => expect(getStore()?.find('survey')?.name).toBe('survey'))
+    expect(getStore()?.find('survey')?.group).toBe('Field')
+    expect(getStore()?.find('survey')?.snapshot).toHaveProperty('footerLayout')
+  })
+
+  it('falls back to the panel when the manager has no footer chip to open from', async () => {
+    const mock = createMockValleyApi({ manifest: { id: 'workspace' } })
+    register(mock.api)
+    await mock.api.commands.execute('workspace:manage', undefined)
+    expect(mock.api.workspace.revealOwnPanel).toHaveBeenCalledWith('left_sidebar')
+  })
+
+  it('reports a failed rename inside the modal instead of dropping it', async () => {
+    const mock = createMockValleyApi({ manifest: { id: 'workspace' } })
+    vi.mocked(mock.api.workspace.captureLayout).mockReturnValue(snapshot('moss'))
+    register(mock.api)
+    await getStore()?.ensureLoaded()
+    await getStore()?.saveCurrent('Moss')
+    await getStore()?.saveCurrent('Lichen')
+    const calls = (mock.api.registerView as unknown as { mock: { calls: [string, ComponentType][] } }).mock.calls
+    const Footer = calls.find(([id]) => id === 'workspace.footer')?.[1]
+    render(React.createElement(Footer as ComponentType))
+    fireEvent.click(screen.getByRole('button', { name: 'Lichen' }))
+    fireEvent.click(screen.getByRole('button', { name: 'More actions for Moss' }))
+    await selectLatestMenu(mock, 'Rename')
+    const input = within(screen.getByTestId('workspace-switcher-row-Moss')).getByDisplayValue('Moss')
+    fireEvent.change(input, { target: { value: 'lichen' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(await screen.findByRole('alert')).toHaveTextContent('A layout or group with this name already exists.')
+    expect(getStore()?.find('Moss')).toBeDefined()
   })
 
   it('keeps the footer switcher open while canceling or confirming deletion', async () => {
@@ -549,13 +655,22 @@ describe('workspace plugin commands', () => {
     expect(screen.queryByTitle('Unsaved changes')).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /More actions for Canopy/ }))
-    await selectLatestMenu(mock, 'Save changes here')
+    await selectLatestMenu(mock, 'Replace with current workspace')
 
     await waitFor(async () => {
       const records = await datasetRows(mock.api, 'workspace.workspace_layouts')
       expect((records[0].snapshot as WorkspaceLayoutSnapshot).layout.id).toBe('changed')
       expect(records[0].group).toBe('Fungi')
     })
+
+    // Duplicate copies the layout into the same group without activating it.
+    fireEvent.click(screen.getByRole('button', { name: /More actions for Canopy/ }))
+    await selectLatestMenu(mock, 'Duplicate')
+    await waitFor(() => expect(getStore()?.find('Canopy copy')).toMatchObject({ group: 'Fungi' }))
+    expect(getStore()?.active).toBe('Canopy')
+    fireEvent.click(screen.getByRole('button', { name: /More actions for Canopy$/ }))
+    await selectLatestMenu(mock, 'Duplicate')
+    await waitFor(() => expect(getStore()?.find('Canopy copy 2')).toBeDefined())
   })
 
   it('renames a layout inline from the ⋯ menu', async () => {
@@ -690,18 +805,16 @@ describe('workspace plugin commands', () => {
     expect(getStore()?.active).toBe('Canopy')
     const { rerender } = render(React.createElement(Panel as ComponentType))
 
-    // Right-click a non-active row: same items as `⋯`. Neither "Save changes
-    // here" nor Deselect — both belong to the ACTIVE layout alone.
+    // Right-click a non-active row: same items as `⋯`, without Deselect —
+    // that belongs to the ACTIVE layout alone.
     fireEvent.contextMenu(screen.getByTestId('workspace-layout-Moss'), { clientX: 120, clientY: 240 })
     const deskItems = mock.menus.at(-1)?.map((item) => item.label)
-    expect(deskItems).toEqual(['Rename', 'Move to Group', undefined, 'Delete'])
+    expect(deskItems).toEqual(['Rename', 'Move to Group', 'Replace with current workspace', 'Duplicate', 'Includes', undefined, 'Delete'])
 
-    // The active row adds both, and Deselect clears the ACTIVE pointer.
+    // The active row adds Deselect, which clears the ACTIVE pointer.
     fireEvent.contextMenu(screen.getByTestId('workspace-layout-Canopy'), { clientX: 120, clientY: 300 })
     expect(mock.menus.at(-1)?.map((item) => item.label)).toEqual([
-      'Rename',
-      'Move to Group',
-      'Save changes here',
+      'Rename', 'Move to Group', 'Replace with current workspace', 'Duplicate', 'Includes',
       'Deselect',
       undefined,
       'Delete'
@@ -713,7 +826,7 @@ describe('workspace plugin commands', () => {
 
     // Both are gone once nothing is active, from either entry point.
     fireEvent.click(screen.getByRole('button', { name: /More actions for Canopy/ }))
-    expect(mock.menus.at(-1)?.map((item) => item.label)).toEqual(['Rename', 'Move to Group', undefined, 'Delete'])
+    expect(mock.menus.at(-1)?.map((item) => item.label)).toEqual(['Rename', 'Move to Group', 'Replace with current workspace', 'Duplicate', 'Includes', undefined, 'Delete'])
   })
 
   it('reaches the same row menu from a right-click inside the manage modal', async () => {
@@ -951,7 +1064,7 @@ describe('workspace plugin commands', () => {
     )
   })
 
-  it('ignores and removes an older right-sidebar scope while that setting is off', async () => {
+  it('adds and drops a saved part from the Includes menu, comparing only what the layout keeps', async () => {
     const legacy = {
       name: 'Legacy',
       group: '',
@@ -969,29 +1082,45 @@ describe('workspace plugin commands', () => {
     const mock = createMockValleyApi({
       manifest: { id: 'workspace' },
       datasets: { 'workspace.workspace_layouts': [{ ...legacy, snapshotVersion: 1 }] },
-      settings: { active: 'Legacy', saveRightSidebarState: false }
+      settings: { active: 'Legacy' }
     })
-    vi.mocked(mock.api.workspace.captureLayout).mockReturnValue(snapshot('legacy'))
+    vi.mocked(mock.api.workspace.captureLayout).mockReturnValue({
+      ...snapshot('legacy'),
+      footerVisible: true,
+      footerLayout: { left: ['vault'], right: [], hidden: [] }
+    })
     register(mock.api)
     await getStore()?.ensureLoaded()
     const calls = (mock.api.registerView as unknown as { mock: { calls: [string, ComponentType][] } }).mock.calls
     const Footer = calls.find(([id]) => id === 'workspace.footer')?.[1]
+    const Panel = calls.find(([id]) => id === 'workspace.panel')?.[1]
 
     render(React.createElement(Footer as ComponentType))
+    // The saved right-sidebar tree differs from the live one.
+    expect(screen.getByRole('button', { name: 'Save current layout' })).toBeInTheDocument()
 
+    render(React.createElement(Panel as ComponentType))
+    fireEvent.click(screen.getByRole('button', { name: /More actions for Legacy/ }))
+    const includes = mock.menus.at(-1)?.find((item) => item.label === 'Includes')
+    expect(includes?.submenu?.map((item) => [item.label, item.checked])).toEqual([
+      ['Right sidebar', true],
+      ['Icon Rail', false],
+      ['Footer', false]
+    ])
+    await act(async () => { await includes?.submenu?.[0].onSelect?.() })
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Saved — no changes to save' })).toBeInTheDocument()
     )
-
-    // Resaving projects the disabled scope away.
-    await act(async () => {
-      await getStore()?.saveCurrent('Legacy', 'Craft')
-    })
-    const records = await datasetRows(mock.api, 'workspace.workspace_layouts')
-    const stored = records.find((r) => r.name === 'Legacy')?.snapshot as Record<string, unknown>
+    let stored = getStore()?.find('Legacy')?.snapshot as unknown as Record<string, unknown>
     expect(stored).not.toHaveProperty('rightSidebarLayout')
-    expect(stored).toHaveProperty('leftSidebarWidth', 260)
     expect(stored).not.toHaveProperty('rightSidebarVisible')
+    expect(stored).toHaveProperty('leftSidebarWidth', 260)
+
+    fireEvent.click(screen.getByRole('button', { name: /More actions for Legacy/ }))
+    await act(async () => { await mock.menus.at(-1)?.find((item) => item.label === 'Includes')?.submenu?.[2].onSelect?.() })
+    stored = getStore()?.find('Legacy')?.snapshot as unknown as Record<string, unknown>
+    expect(stored).toMatchObject({ footerVisible: true, footerLayout: { left: ['vault'], right: [], hidden: [] } })
+    expect(await screen.findByTestId('workspace-scopes-Legacy')).toBeInTheDocument()
   })
 })
 

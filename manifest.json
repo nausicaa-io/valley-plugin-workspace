@@ -2,8 +2,8 @@
   "apiVersion": 5,
   "id": "workspace",
   "name": "Workspace",
-  "version": "2.0.0",
-  "description": "Save and restore exact named workspace layouts: panes, tabs, the left sidebar, and optional right sidebar, Icon Rail, Footer Rail, and plugin view state.",
+  "version": "2.1.0",
+  "description": "Save and restore exact named workspace layouts: panes, tabs, and the left sidebar, plus the right sidebar, Icon Rail, and footer when a layout includes them, and plugin view state.",
   "author": [
     "Yanik"
   ],

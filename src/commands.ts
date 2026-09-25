@@ -11,7 +11,8 @@
  */
 import type { ValleyPluginApi } from '@valley/plugin-sdk'
 import type { WorkspaceLayoutSnapshot } from '@valley/plugin-sdk/types'
-import { getStore, type SavedLayout, type WorkspaceStore } from './store'
+import { getStore, scopesOf, type SavedLayout, type WorkspaceStore } from './store'
+import { openManager } from './surfaces'
 
 function live(): WorkspaceStore {
   const store = getStore()
@@ -20,10 +21,24 @@ function live(): WorkspaceStore {
 }
 
 const asStr = (v: unknown): string => (typeof v === 'string' ? v : v == null ? '' : String(v))
+const asBool = (v: unknown): boolean | undefined =>
+  v === true || v === 'true' ? true : v === false || v === 'false' ? false : undefined
+const ALL_SCOPES = { rightSidebar: true, iconRail: true, footer: true }
+const LABEL_KEYS: Record<string, string> = {
+  load: 'auto.2083a7975446',
+  open: 'auto.35186cddddda',
+  delete: 'auto.fcabbd9c3676',
+  close: 'auto.8b50a28bc4f2'
+}
 
 interface NamedInput {
   name: string
   group?: string
+}
+interface SaveInput extends NamedInput {
+  rightSidebar?: boolean
+  iconRail?: boolean
+  footer?: boolean
 }
 interface RenameInput {
   name: string
@@ -44,10 +59,11 @@ interface GroupsResult {
   groups: { name: string; layouts: number }[]
 }
 
-/** Re-insert a removed/overwritten layout and restore the prior active name. */
-function restoreLayout(store: WorkspaceStore, prior: SavedLayout | undefined, priorActive: string | null) {
+/** Re-insert a removed/overwritten layout (or drop a new one) and restore the prior active name. */
+function restoreLayout(store: WorkspaceStore, prior: SavedLayout | undefined, priorActive: string | null, created?: string) {
   return async (): Promise<void> => {
     if (prior) await store.upsert(prior)
+    else if (created) await store.deleteByName(created)
     await store.setActive(priorActive)
   }
 }
@@ -55,42 +71,57 @@ function restoreLayout(store: WorkspaceStore, prior: SavedLayout | undefined, pr
 export function registerWorkspaceCommands(api: ValleyPluginApi): () => void {
   const revision = async () => { const store = live(); await store.ensureLoaded(); return { layouts: store.layouts, active: store.active, groups: store.groups() } }
   /** Capture the current arrangement under `name` (overwrites + activates). */
-  const saveNamed = api.commands.register<NamedInput, SaveResult, 'write'>({
+  const saveNamed = api.commands.register<SaveInput, SaveResult, 'write'>({
     id: 'save',
     label: 'Workspace: Save current layout as…', labelKey: 'auto.c8227a6250a2',
     paletteSafe: false,
     sideEffect: 'write',
     revision,
     input: {
-      schema: { type: 'object', properties: { name: { type: 'string', minLength: 1 }, group: { type: 'string' } }, required: ['name'], additionalProperties: false },
+      schema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', minLength: 1 },
+          group: { type: 'string' },
+          rightSidebar: { type: 'boolean' },
+          iconRail: { type: 'boolean' },
+          footer: { type: 'boolean' }
+        },
+        required: ['name'],
+        additionalProperties: false
+      },
       parse: (raw) => {
         const o = (raw ?? {}) as Record<string, unknown>
         const name = asStr(o.name).trim()
-        if (!name) throw new Error('Usage: workspace save "<name>" [--group "<group>"]')
-        return { name, group: asStr(o.group).trim() }
+        if (!name) throw new Error('Usage: workspace save "<name>" [--group "<group>"] [--right-sidebar] [--icon-rail] [--footer]')
+        return { name, group: asStr(o.group).trim(), rightSidebar: asBool(o.rightSidebar), iconRail: asBool(o.iconRail), footer: asBool(o.footer) }
       },
-      fromCli: (args, flags) => ({ name: args.join(' ').trim(), group: asStr(flags.group).trim() })
+      fromCli: (args, flags) => ({
+        name: args.join(' ').trim(),
+        group: asStr(flags.group).trim(),
+        rightSidebar: asBool(flags['right-sidebar']),
+        iconRail: asBool(flags['icon-rail']),
+        footer: asBool(flags.footer)
+      })
     },
-    run: async ({ name, group }) => {
+    run: async ({ name, group, rightSidebar, iconRail, footer }) => {
       const store = live()
       await store.ensureLoaded()
       const prior = store.find(name)
       const priorActive = store.active
-      const now = Date.now()
-      const layout: SavedLayout = {
-        name,
-        group: group ?? '',
-        snapshot: store.captureForSave(prior?.snapshot),
-        createdAt: prior?.createdAt ?? now,
-        modifiedAt: now
-      }
-      await store.upsert(layout)
-      await store.setActive(name)
+      // Parts the caller leaves out keep the layout's own choice, or the
+      // settings' defaults for a new layout.
+      const base = prior ? scopesOf(prior.snapshot) : store.defaultScopes()
+      const layout = await store.saveCurrent(name, group, {
+        rightSidebar: rightSidebar ?? base.rightSidebar,
+        iconRail: iconRail ?? base.iconRail,
+        footer: footer ?? base.footer
+      })
       return {
-        value: { name, group: layout.group },
+        value: { name: layout.name, group: layout.group },
         revert: {
-          label: `Save layout "${name}"`,
-          run: restoreLayout(store, prior, priorActive)
+          label: `Save layout "${layout.name}"`,
+          run: restoreLayout(store, prior, priorActive, layout.name)
         }
       }
     },
@@ -98,8 +129,8 @@ export function registerWorkspaceCommands(api: ValleyPluginApi): () => void {
   })
 
   // A palette-safe, no-argument "save what I have now": re-capture the active
-  // layout (the footer Save button does the same). With no active layout there's
-  // nothing to overwrite, so reveal the panel where the user can name one.
+  // layout with its own parts (the footer Save button does the same). With no
+  // active layout there's nothing to overwrite, so open the manager to name one.
   const saveActive = api.commands.register<void, { name: string | null }, 'write'>({
     id: 'save-active',
     label: 'Workspace: Save current layout', labelKey: 'auto.2db7866c659c',
@@ -112,18 +143,18 @@ export function registerWorkspaceCommands(api: ValleyPluginApi): () => void {
       await store.ensureLoaded()
       const active = store.active ? store.find(store.active) : undefined
       if (!active) {
-        api.workspace.revealOwnPanel('left_sidebar')
+        if (!openManager('save')) api.workspace.revealOwnPanel('left_sidebar')
         return { value: { name: null }, revert: null }
       }
       const prior = active
       const priorActive = store.active
-      await store.upsert({ ...active, snapshot: store.captureForSave(active.snapshot), modifiedAt: Date.now() })
+      await store.replaceWithCurrent(active.name)
       return {
         value: { name: active.name },
         revert: { label: `Save layout "${active.name}"`, run: restoreLayout(store, prior, priorActive) }
       }
     },
-    formatCli: (v) => (v.name ? `Saved layout "${v.name}".` : 'Open the Workspace panel to name a layout.')
+    formatCli: (v) => (v.name ? `Saved layout "${v.name}".` : 'Open the workspace manager to name a layout.')
   })
 
   /** load / open share one body — "open" reads more naturally on the CLI. */
@@ -131,6 +162,7 @@ export function registerWorkspaceCommands(api: ValleyPluginApi): () => void {
     api.commands.register<NamedInput, { name: string }, 'write'>({
       id,
       label: `Workspace: ${verb[0].toUpperCase()}${verb.slice(1)} a saved layout`,
+      labelKey: LABEL_KEYS[id],
       paletteSafe: false,
       sideEffect: 'write',
     revision,
@@ -148,7 +180,8 @@ export function registerWorkspaceCommands(api: ValleyPluginApi): () => void {
         await store.ensureLoaded()
         const target = store.find(name)
         if (!target) throw new Error(`No saved layout named "${name}".`)
-        const priorSnapshot: WorkspaceLayoutSnapshot = store.capture()
+        // Undo restores every part a layout may carry, whatever this one saved.
+        const priorSnapshot: WorkspaceLayoutSnapshot = store.capture(ALL_SCOPES)
         const priorActive = store.active
         store.applySnapshot(target.snapshot)
         await store.setActive(target.name)
@@ -171,6 +204,7 @@ export function registerWorkspaceCommands(api: ValleyPluginApi): () => void {
     api.commands.register<NamedInput, { name: string }, 'write'>({
       id,
       label: `Workspace: ${verb[0].toUpperCase()}${verb.slice(1)} a saved layout`,
+      labelKey: LABEL_KEYS[id],
       paletteSafe: false,
       sideEffect: 'write',
     revision,
@@ -429,7 +463,9 @@ export function registerWorkspaceCommands(api: ValleyPluginApi): () => void {
     label: 'Workspace: Manage workspace layouts', labelKey: 'auto.24c9b9b89804',
     sideEffect: 'read',
     run: () => {
-      api.workspace.revealOwnPanel('left_sidebar')
+      // The manager lives behind the footer chip; with that chip hidden, the
+      // sidebar panel is the place that can still manage layouts.
+      if (!openManager('search')) api.workspace.revealOwnPanel('left_sidebar')
       return undefined
     }
   })

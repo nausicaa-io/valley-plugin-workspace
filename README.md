@@ -1,6 +1,6 @@
 # Workspace
 
-Save and restore exact named workspace layouts: panes, tabs, the left sidebar, and optional right sidebar, Icon Rail, Footer Rail, and plugin view state.
+Save and restore exact named workspace layouts: panes, tabs, and the left sidebar, plus the right sidebar, Icon Rail, and footer when a layout includes them, and plugin view state. Each layout chooses its parts when it is saved (Settings seeds the choice) and can change them later from its Includes menu.
 
 This repository owns the plugin’s interface, behavior, dependencies, schemas, tests, translations, and compiled releases. It uses Valley manifest API 5 and the injected SDK 6.
 

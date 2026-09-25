@@ -2,15 +2,15 @@
  * Built-in Workspace plugin — Obsidian-style saved layouts.
  *
  * A left-sidebar panel ("Workspace layouts") lets you save the current
- * arrangement (pane/tab tree, left sidebar and selected panel, plus configured
- * optional rails/right-sidebar scopes) under a name, load it back, organize layouts into groups, rename and
- * delete them — with an `ACTIVE`
+ * arrangement (pane/tab tree, left sidebar and selected panel, plus the optional
+ * right sidebar, Icon Rail and footer parts chosen per layout) under a name, load
+ * it back, organize layouts into groups, rename and delete them — with an `ACTIVE`
  * badge on the layout you last saved/loaded. Groups are first-class: naming an
  * unknown group in the save field creates it on the spot, with no layout in it
  * (see `store.ts` for how an empty group is persisted). A group header carries
  * no buttons of its own — right-click renames or deletes it, double-clicking its
  * name renames in place. Each row is a single click-to-load line; a `⋯` overflow
- * menu holds Rename / Move to Group / Save changes / Delete so the row never
+ * menu holds Rename / Move to Group / Replace / Duplicate / Includes / Delete so the row never
  * gets crowded. A footer chip mirrors which layout is active
  * with a one-tap save, and opens the full manager (`ManageModal.tsx`).
  * The same actions are exposed on the command bus (`workspace:save/save-active/
@@ -27,12 +27,12 @@
  */
 import type { ValleyPluginApi, ValleyPluginModule } from '@valley/plugin-sdk'
 import { registerWorkspaceCommands } from './commands'
-import { createStore, getStore, type SavedLayout } from './store'
+import { createStore, getStore, scopesOf, type LayoutScopes, type SavedLayout } from './store'
 import { initLocalization } from './localization'
 import { uiText } from './localization'
 import { initRuntime, React } from './runtime'
 import { ManageModal } from './ManageModal'
-import { patchWorkspaceSurface, registerWorkspaceSurfaces, useWorkspaceSurface } from './surfaces'
+import { patchWorkspaceSurface, registerWorkspaceSurfaces, useFooterMount, useWorkspaceSurface } from './surfaces'
 import {
   checkmarkDoneIcon,
   chevronDownIcon,
@@ -40,10 +40,11 @@ import {
   clearIcon,
   deselectIcon,
   folderIcon,
+  moreIcon,
   saveIcon,
   searchIcon
 } from './icons'
-import { SANS, ago, fieldStyle, groupField, openGroupMenu, openLayoutMenu, pill } from './ui'
+import { SANS, ago, failureText, fieldStyle, groupField, openGroupMenu, openLayoutMenu, pill, scopeBadges, scopeToggles } from './ui'
 
 const LAYOUT_DND_TYPE = 'application/x-valley-workspace-layout'
 
@@ -69,9 +70,9 @@ export function register(api: ValleyPluginApi): () => void {
   // user click never becomes a plugin-originated Guard command.
   const FooterItem = (): ReturnType<typeof h> | null => {
     const [, force] = React.useState(0)
-    const { managerOpen: switcherOpen } = useWorkspaceSurface('footer')
-    const setSwitcherOpen = (managerOpen: boolean): void => patchWorkspaceSurface('footer', { managerOpen })
-    const [switcherFocus, setSwitcherFocus] = React.useState<'search' | 'save'>('search')
+    useFooterMount()
+    const { managerOpen: switcherOpen, managerFocus: switcherFocus } = useWorkspaceSurface('footer')
+    const openSwitcher = (managerFocus: 'search' | 'save'): void => patchWorkspaceSurface('footer', { managerOpen: true, managerFocus })
     React.useEffect(() => {
       const s = getStore()
       void s?.ensureLoaded()
@@ -90,18 +91,15 @@ export function register(api: ValleyPluginApi): () => void {
     const activeName = activeLayout?.name ?? null
     const saved = !!activeLayout && s.isCurrent(activeLayout.snapshot)
 
-    const closeSwitcher = (): void => {
-      setSwitcherOpen(false)
-      setSwitcherFocus('search')
-    }
+    const closeSwitcher = (): void => patchWorkspaceSurface('footer', { managerOpen: false, managerFocus: 'search' })
 
+    // Re-saves the active layout with its own parts and group.
     const saveFromFooter = (): void => {
       if (!activeLayout) {
-        setSwitcherFocus('save')
-        setSwitcherOpen(true)
+        openSwitcher('save')
         return
       }
-      void s.saveCurrent(activeLayout.name, activeLayout.group).catch(() => undefined)
+      void s.replaceWithCurrent(activeLayout.name).catch(() => undefined)
     }
 
     const switcher = switcherOpen
@@ -126,10 +124,7 @@ export function register(api: ValleyPluginApi): () => void {
           'button',
           {
             title: uiText('auto.3ab6bff19b6d'),
-            onClick: () => {
-              setSwitcherFocus('search')
-              setSwitcherOpen(true)
-            },
+            onClick: () => openSwitcher('search'),
             style: {
               fontFamily: SANS,
               fontSize: 'inherit',
@@ -199,6 +194,8 @@ export function register(api: ValleyPluginApi): () => void {
     const [, force] = React.useState(0)
     const [name, setName] = React.useState('')
     const [group, setGroup] = React.useState('')
+    const [chosenScopes, setChosenScopes] = React.useState<LayoutScopes | null>(null)
+    const [error, setError] = React.useState<string | null>(null)
     const [collapsed, setCollapsed] = React.useState<Record<string, boolean>>({})
     const [renaming, setRenaming] = React.useState<string | null>(null)
     const [renameDraft, setRenameDraft] = React.useState('')
@@ -249,13 +246,18 @@ export function register(api: ValleyPluginApi): () => void {
     const active = s?.active ?? null
     const groups = s?.groups() ?? []
     const showGroupHeaders = groups.length > 1 || (groups[0]?.group ?? '') !== ''
+    const fail = (e: unknown): void => setError(failureText(e))
+    const existing = name.trim() ? s?.find(name.trim()) : undefined
+    const saveScopes = chosenScopes ?? (existing ? scopesOf(existing.snapshot) : s?.defaultScopes() ?? { rightSidebar: true, iconRail: true, footer: false })
 
     const doSave = (): void => {
       const trimmed = name.trim()
       if (!trimmed || !s) return
-      void s.saveCurrent(trimmed, group.trim())
+      setError(null)
+      void s.saveCurrent(trimmed, group.trim(), saveScopes).catch(fail)
       setName('')
       setGroup('')
+      setChosenScopes(null)
     }
 
     // Typing a name the save field's dropdown doesn't know creates that group
@@ -265,7 +267,7 @@ export function register(api: ValleyPluginApi): () => void {
       setGroup(next)
       const trimmed = next.trim()
       if (!trimmed || !s || s.hasGroup(trimmed)) return
-      void s.createGroup(trimmed).catch(() => undefined)
+      void s.createGroup(trimmed).catch(fail)
     }
 
 
@@ -278,7 +280,7 @@ export function register(api: ValleyPluginApi): () => void {
       const next = renameDraft.trim()
       setRenaming(null)
       if (!s || !next || next === oldName) return
-      void s.renameByName(oldName, next).catch(() => undefined)
+      void s.renameByName(oldName, next).catch(fail)
     }
 
     const startGroupRename = (groupKey: string): void => {
@@ -290,7 +292,7 @@ export function register(api: ValleyPluginApi): () => void {
       const next = groupRenameDraft.trim()
       setGroupRenaming(null)
       if (!s || !next || next === oldGroup) return
-      void s.renameGroup(oldGroup, next).catch(() => undefined)
+      void s.renameGroup(oldGroup, next).catch(fail)
     }
 
     const input = (
@@ -316,7 +318,7 @@ export function register(api: ValleyPluginApi): () => void {
     /** One menu for both entry points: the `⋯` button and a row right-click. */
     const openRowMenu = (layout: SavedLayout, target: HTMLElement | { x: number; y: number }): void => {
       patchWorkspaceSurface('left_sidebar', { selected: layout.name })
-      openLayoutMenu(layout, target, { onRename: () => startRename(layout) })
+      openLayoutMenu(layout, target, { onRename: () => startRename(layout), onError: fail })
     }
 
     /** Rename / delete for a group, from a right-click on its header. */
@@ -371,7 +373,7 @@ export function register(api: ValleyPluginApi): () => void {
           'data-testid': `workspace-layout-${layout.name}`,
           draggable: !inert,
           title: inert ? undefined : uiText('auto.116ebc27f2e5', { p0: layout.name }),
-          onClick: inert ? undefined : () => { patchWorkspaceSurface('left_sidebar', { selected: layout.name }); void s?.loadByName(layout.name) },
+          onClick: inert ? undefined : () => { patchWorkspaceSurface('left_sidebar', { selected: layout.name }); void s?.loadByName(layout.name).catch(fail) },
           // Right-click opens the same menu as `⋯`, at the pointer.
           onContextMenu: inert
             ? undefined
@@ -420,8 +422,9 @@ export function register(api: ValleyPluginApi): () => void {
             ? null
             : h(
                 'div',
-                { style: { fontFamily: SANS, fontSize: '0.6875rem', color: 'var(--text-secondary)' } },
-                ago(layout.modifiedAt)
+                { style: { display: 'flex', alignItems: 'center', gap: '6px', fontFamily: SANS, fontSize: '0.6875rem', color: 'var(--text-secondary)' } },
+                ago(layout.modifiedAt),
+                scopeBadges(layout)
               )
         ),
         inert
@@ -436,9 +439,8 @@ export function register(api: ValleyPluginApi): () => void {
                   openRowMenu(layout, e.currentTarget)
                 },
                 style: {
-                  fontFamily: SANS,
-                  fontSize: '1rem',
                   lineHeight: 1,
+                  padding: 0,
                   width: '26px',
                   height: '26px',
                   flexShrink: 0,
@@ -452,7 +454,7 @@ export function register(api: ValleyPluginApi): () => void {
                   border: '1px solid transparent'
                 }
               },
-              '⋯'
+              moreIcon(15)
             )
       )
     }
@@ -591,7 +593,7 @@ export function register(api: ValleyPluginApi): () => void {
         setDraggedLayout(null)
         setDropGroup(null)
         if (!source || !s) return
-        void s.setGroup(source, groupKey).catch(() => undefined)
+        void s.setGroup(source, groupKey).catch(fail)
       }
       return h(
         'div',
@@ -741,7 +743,11 @@ export function register(api: ValleyPluginApi): () => void {
           uiText('auto.aa4b0670d981')
         ),
         input(name, setName, uiText('auto.86d9d2611878'), doSave),
-        groupField(group, chooseGroup)
+        groupField(group, chooseGroup),
+        scopeToggles(saveScopes, setChosenScopes, { compact: true }),
+        error
+          ? h('div', { role: 'alert', style: { fontFamily: SANS, fontSize: '0.6875rem', color: 'var(--danger-tint-text)' } }, error)
+          : null
       ),
       h('div', { style: { height: '1px', background: 'var(--border-light)', margin: '2px 0' } }),
       groups.length === 0
@@ -806,13 +812,13 @@ export function register(api: ValleyPluginApi): () => void {
                 padding: '3px 10px',
                 borderRadius: '6px',
                 cursor: name.trim() ? 'pointer' : 'default',
-                color: name.trim() ? '#fff' : 'var(--text-secondary)',
+                color: name.trim() ? 'var(--accent-contrast)' : 'var(--text-secondary)',
                 background: name.trim() ? 'var(--accent-color)' : 'transparent',
                 border: '1px solid ' + (name.trim() ? 'var(--accent-color)' : 'var(--border-light)'),
                 opacity: name.trim() ? 1 : 0.7
               }
             },
-            uiText('auto.efc007a393f6')
+            existing ? uiText('auto.a7cf7b25a703') : uiText('auto.efc007a393f6')
           )
         )
       ),
